@@ -1,0 +1,35 @@
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# SQLite database
+*.db
+*.sqlite
+*.sqlite3
+smarthire.db
+
+# Uploaded files
+uploads/*
+!uploads/.gitkeep
+
+# Environment & Secrets
+.env
+.env.*
+*.secret
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
