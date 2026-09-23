@@ -32,6 +32,21 @@ def extract_text_from_docx(docx_path: str) -> str:
     return "\n".join(parts)
 
 
+def extract_text_from_txt(txt_path: str) -> str:
+    """Extract raw text from a plain-text (.txt) resume.
+
+    Tries UTF-8 first (with BOM handling) since that covers the vast majority
+    of resumes; falls back to Latin-1 (which accepts any byte sequence) so an
+    unusual encoding never raises instead of just parsing imperfectly.
+    """
+    try:
+        with open(txt_path, "r", encoding="utf-8-sig") as f:
+            return f.read()
+    except UnicodeDecodeError:
+        with open(txt_path, "r", encoding="latin-1") as f:
+            return f.read()
+
+
 def extract_text(file_path: str) -> str:
     """Dispatch to the right extractor based on file extension."""
     lower = file_path.lower()
@@ -39,5 +54,7 @@ def extract_text(file_path: str) -> str:
         return extract_text_from_pdf(file_path)
     elif lower.endswith(".docx"):
         return extract_text_from_docx(file_path)
+    elif lower.endswith(".txt"):
+        return extract_text_from_txt(file_path)
     else:
-        raise ValueError(f"Unsupported file type: {file_path}. Only .pdf and .docx are supported.")
+        raise ValueError(f"Unsupported file type: {file_path}. Only .pdf, .docx, and .txt are supported.")

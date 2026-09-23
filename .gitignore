@@ -24,6 +24,7 @@ uploads/*
 # Environment & Secrets
 .env
 .env.*
+!.env.example
 *.secret
 
 # IDE and OS files
