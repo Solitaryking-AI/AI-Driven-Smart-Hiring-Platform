@@ -19,6 +19,7 @@ import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import env_loader  # Ensures .env is loaded before checking secrets
 from jose import JWTError, jwt
 
 # ---------------------------------------------------------------------------

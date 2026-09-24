@@ -580,6 +580,17 @@ def _fmt_bytes(n: int) -> str:
     return f"{n/1024:.0f} KB" if n >= 1024 else f"{n} B"
 
 
+def _safe_fetch_file(url: str, token: str, timeout: int = 15) -> Optional[bytes]:
+    """Safely fetch file bytes from API with timeout and error suppression."""
+    try:
+        r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
+        if r.status_code == 200:
+            return r.content
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Auth — Login
 # ---------------------------------------------------------------------------
@@ -767,7 +778,7 @@ def show_dashboard():
             st.rerun()
 
     # ── Fetch data (shared across tabs) ──────────────────────────────────
-    candidates_res = api_request("GET", "/api/candidates", token=token)
+    candidates_res = api_request("GET", "/api/candidates?limit=1000", token=token)
     _handle_unauthorized(candidates_res)
     candidates = []
     if not (isinstance(candidates_res, dict) and "error" in candidates_res):
@@ -1148,36 +1159,40 @@ def show_dashboard():
                         st.error(mr["error"])
                     else:
                         results = mr if isinstance(mr, list) else mr.get("results", [])
-                        if not results:
-                            st.info("No candidates to match. Upload some resumes first.")
-                        else:
-                            st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-                            for item in results:
-                                name    = _display_name(item.get("candidate_name"))
-                                email   = _display_email(item.get("email"))
-                                score   = item.get("match_score", 0)
-                                matched = item.get("matched_skills", [])
-                                missing = item.get("missing_skills", [])
-                                bar_col = _score_bar_color(score)
-                                badge   = _score_badge(score)
+                        st.session_state["quick_match_results"] = results
 
-                                matched_html = _skill_badges(matched, "success")
-                                missing_html = _skill_badges(missing, "danger")
+            saved_quick = st.session_state.get("quick_match_results")
+            if saved_quick is not None:
+                if not saved_quick:
+                    st.info("No candidates to match. Upload some resumes first.")
+                else:
+                    st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
+                    for item in saved_quick:
+                        name    = _display_name(item.get("candidate_name"))
+                        email   = _display_email(item.get("email"))
+                        score   = item.get("match_score", 0)
+                        matched = item.get("matched_skills", [])
+                        missing = item.get("missing_skills", [])
+                        bar_col = _score_bar_color(score)
+                        badge   = _score_badge(score)
 
-                                st.markdown(f"""
-                                <div class='sh-match-row'>
-                                    <div class='sh-match-info'>
-                                        <div class='sh-match-name'>{name}</div>
-                                        <div class='sh-match-email'>{email}</div>
-                                        <div>{matched_html}{missing_html}</div>
-                                        <div class='sh-progress-track'>
-                                            <div class='sh-progress-fill'
-                                                 style='width:{min(score,100):.0f}%;background:{bar_col};'></div>
-                                        </div>
-                                    </div>
-                                    <div class='sh-match-score-col'>{badge}</div>
+                        matched_html = _skill_badges(matched, "success")
+                        missing_html = _skill_badges(missing, "danger")
+
+                        st.markdown(f"""
+                        <div class='sh-match-row'>
+                            <div class='sh-match-info'>
+                                <div class='sh-match-name'>{name}</div>
+                                <div class='sh-match-email'>{email}</div>
+                                <div>{matched_html}{missing_html}</div>
+                                <div class='sh-progress-track'>
+                                    <div class='sh-progress-fill'
+                                         style='width:{min(score,100):.0f}%;background:{bar_col};'></div>
                                 </div>
-                                """, unsafe_allow_html=True)
+                            </div>
+                            <div class='sh-match-score-col'>{badge}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
 
         else:
             # Match against saved job
@@ -1257,9 +1272,13 @@ def show_dashboard():
                 </div>
                 """, unsafe_allow_html=True)
 
-                col_match_btn, _ = st.columns([2, 3])
+                col_match_btn, col_clear_btn = st.columns([2, 1])
                 with col_match_btn:
                     run_job_match = st.button("Match Candidates to Job", type="primary", use_container_width=True)
+                with col_clear_btn:
+                    if st.button("Clear Results", use_container_width=True, key=f"clear_match_{selected_job['job_id']}"):
+                        st.session_state.pop(f"job_match_{selected_job['job_id']}", None)
+                        st.rerun()
 
                 if run_job_match:
                     with st.spinner(f"Matching candidates for {selected_job['title']}…"):
@@ -1269,59 +1288,63 @@ def show_dashboard():
                     if isinstance(match_res, dict) and "error" in match_res:
                         st.error(match_res["error"])
                     else:
-                        breakdown_list = match_res if isinstance(match_res, list) else []
-                        if not breakdown_list:
-                            st.info("No candidates found in database to evaluate.")
-                        else:
-                            st.markdown(f"<div class='sh-page-subtitle' style='margin:14px 0 8px;'>Ranked {len(breakdown_list)} candidates for <b>{selected_job['title']}</b>:</div>",
-                                        unsafe_allow_html=True)
-                            cand_hs_map = {c.get("candidate_id"): c.get("hiring_score", 70.0) for c in candidates if c.get("candidate_id") is not None}
-                            for cand in breakdown_list:
-                                c_name = _display_name(cand.get("candidate_name"))
-                                c_email = _display_email(cand.get("email"))
-                                f_score = cand.get("final_score", 0.0)
-                                sk_score = cand.get("skills_score", 0.0)
-                                nth_score = cand.get("nice_to_have_score", 0.0)
-                                exp_fit = cand.get("experience_fit_score", 0.0)
-                                exp_yrs = cand.get("candidate_experience_years", 0.0)
+                        st.session_state[f"job_match_{selected_job['job_id']}"] = match_res if isinstance(match_res, list) else []
 
-                                cid = cand.get("candidate_id")
-                                hs = cand_hs_map.get(cid)
-                                if hs is None:
-                                    hs = hiring_score_engine.calculate_hiring_score(cand).get("hiring_score", 70.0)
-                                blended_score = hiring_score_engine.blend_with_job_match(hs, f_score, hiring_weight=0.35)
+                saved_job_match = st.session_state.get(f"job_match_{selected_job['job_id']}")
+                if saved_job_match is not None:
+                    breakdown_list = saved_job_match if isinstance(saved_job_match, list) else []
+                    if not breakdown_list:
+                        st.info("No candidates found in database to evaluate.")
+                    else:
+                        st.markdown(f"<div class='sh-page-subtitle' style='margin:14px 0 8px;'>Ranked {len(breakdown_list)} candidates for <b>{selected_job['title']}</b>:</div>",
+                                    unsafe_allow_html=True)
+                        cand_hs_map = {c.get("candidate_id"): c.get("hiring_score", 70.0) for c in candidates if c.get("candidate_id") is not None}
+                        for cand in breakdown_list:
+                            c_name = _display_name(cand.get("candidate_name"))
+                            c_email = _display_email(cand.get("email"))
+                            f_score = cand.get("final_score", 0.0)
+                            sk_score = cand.get("skills_score", 0.0)
+                            nth_score = cand.get("nice_to_have_score", 0.0)
+                            exp_fit = cand.get("experience_fit_score", 0.0)
+                            exp_yrs = cand.get("candidate_experience_years", 0.0)
 
-                                matched_req = _skill_badges(cand.get("matched_required", []), "success")
-                                missing_req = _skill_badges(cand.get("missing_required", []), "danger")
-                                matched_nth = _skill_badges(cand.get("matched_nice_to_have", []), "primary")
+                            cid = cand.get("candidate_id")
+                            hs = cand_hs_map.get(cid)
+                            if hs is None:
+                                hs = hiring_score_engine.calculate_hiring_score(cand).get("hiring_score", 70.0)
+                            blended_score = hiring_score_engine.blend_with_job_match(hs, f_score, hiring_weight=0.35)
 
-                                bar_col = _score_bar_color(blended_score)
-                                badge = _score_badge(blended_score)
+                            matched_req = _skill_badges(cand.get("matched_required", []), "success")
+                            missing_req = _skill_badges(cand.get("missing_required", []), "danger")
+                            matched_nth = _skill_badges(cand.get("matched_nice_to_have", []), "primary")
 
-                                nth_markup = f" · <span style='color:#94a3b8;'>Nice-to-Have:</span> {matched_nth}" if matched_nth else ""
+                            bar_col = _score_bar_color(blended_score)
+                            badge = _score_badge(blended_score)
 
-                                st.markdown(f"""
-                                <div class='sh-match-row'>
-                                    <div class='sh-match-info'>
-                                        <div class='sh-match-name'>{c_name}</div>
-                                        <div class='sh-match-email'>{c_email}</div>
-                                        <div class='sh-match-subscores'>
-                                            Job Fit: <b>{f_score:.0f}%</b> · Hiring Score: <b>{hs:.0f}%</b> · Blended: <b>{blended_score:.0f}%</b>
-                                        </div>
-                                        <div class='sh-match-subscores' style='font-size:11px;color:#94a3b8;margin-top:2px;'>
-                                            Required Skills: {sk_score:.0f}% · Nice-to-Have: {nth_score:.0f}% · Experience Fit: {exp_fit:.0f}% (~{exp_yrs:.1f} yrs)
-                                        </div>
-                                        <div>{matched_req}{missing_req}{nth_markup}</div>
-                                        <div class='sh-progress-track'>
-                                            <div class='sh-progress-fill' style='width:{min(blended_score,100):.0f}%;background:{bar_col};'></div>
-                                        </div>
+                            nth_markup = f" · <span style='color:#94a3b8;'>Nice-to-Have:</span> {matched_nth}" if matched_nth else ""
+
+                            st.markdown(f"""
+                            <div class='sh-match-row'>
+                                <div class='sh-match-info'>
+                                    <div class='sh-match-name'>{c_name}</div>
+                                    <div class='sh-match-email'>{c_email}</div>
+                                    <div class='sh-match-subscores'>
+                                        Job Fit: <b>{f_score:.0f}%</b> · Hiring Score: <b>{hs:.0f}%</b> · Blended: <b>{blended_score:.0f}%</b>
                                     </div>
-                                    <div class='sh-match-score-col'>
-                                        {badge}
-                                        <div style='font-size:10px;color:#94a3b8;margin-top:2px;text-align:center;'>Blended</div>
+                                    <div class='sh-match-subscores' style='font-size:11px;color:#94a3b8;margin-top:2px;'>
+                                        Required Skills: {sk_score:.0f}% · Nice-to-Have: {nth_score:.0f}% · Experience Fit: {exp_fit:.0f}% (~{exp_yrs:.1f} yrs)
+                                    </div>
+                                    <div>{matched_req}{missing_req}{nth_markup}</div>
+                                    <div class='sh-progress-track'>
+                                        <div class='sh-progress-fill' style='width:{min(blended_score,100):.0f}%;background:{bar_col};'></div>
                                     </div>
                                 </div>
-                                """, unsafe_allow_html=True)
+                                <div class='sh-match-score-col'>
+                                    {badge}
+                                    <div style='font-size:10px;color:#94a3b8;margin-top:2px;text-align:center;'>Blended</div>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════════════════════
     # Tab 5 — Skill Gap Report
@@ -1460,27 +1483,21 @@ def show_dashboard():
                 st.markdown("<div class='sh-section-heading'>Export Executive Report</div>", unsafe_allow_html=True)
                 exp1, exp2, _ = st.columns([1.2, 1.5, 2.5])
                 with exp1:
-                    csv_resp = requests.get(
-                        f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/export?format=csv",
-                        headers={"Authorization": f"Bearer {token}"},
-                    )
-                    if csv_resp.status_code == 200:
+                    csv_bytes = _safe_fetch_file(f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/export?format=csv", token)
+                    if csv_bytes:
                         st.download_button(
                             "⬇ Download CSV",
-                            data=csv_resp.content,
+                            data=csv_bytes,
                             file_name=f"skill_gap_report_job_{selected_job_id}.csv",
                             mime="text/csv",
                             use_container_width=True,
                         )
                 with exp2:
-                    docx_resp = requests.get(
-                        f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/export?format=docx",
-                        headers={"Authorization": f"Bearer {token}"},
-                    )
-                    if docx_resp.status_code == 200:
+                    docx_bytes = _safe_fetch_file(f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/export?format=docx", token)
+                    if docx_bytes:
                         st.download_button(
                             "⬇ Download Word (.docx)",
-                            data=docx_resp.content,
+                            data=docx_bytes,
                             file_name=f"skill_gap_report_job_{selected_job_id}.docx",
                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                             use_container_width=True,
@@ -1612,28 +1629,28 @@ def show_dashboard():
                                 st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
                                 dcol1, dcol2, _ = st.columns([1.2, 1.5, 2.5])
                                 with dcol1:
-                                    c_csv_resp = requests.get(
+                                    c_csv_bytes = _safe_fetch_file(
                                         f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/candidates/{selected_cid}/development-report/export?format=csv",
-                                        headers={"Authorization": f"Bearer {token}"},
+                                        token,
                                     )
-                                    if c_csv_resp.status_code == 200:
+                                    if c_csv_bytes:
                                         st.download_button(
                                             "⬇ Download CSV",
-                                            data=c_csv_resp.content,
+                                            data=c_csv_bytes,
                                             file_name=f"development_report_candidate_{selected_cid}_job_{selected_job_id}.csv",
                                             mime="text/csv",
                                             key=f"dl_cand_dev_csv_{selected_cid}",
                                             use_container_width=True,
                                         )
                                 with dcol2:
-                                    c_docx_resp = requests.get(
+                                    c_docx_bytes = _safe_fetch_file(
                                         f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/candidates/{selected_cid}/development-report/export?format=docx",
-                                        headers={"Authorization": f"Bearer {token}"},
+                                        token,
                                     )
-                                    if c_docx_resp.status_code == 200:
+                                    if c_docx_bytes:
                                         st.download_button(
                                             "⬇ Download Word (.docx)",
-                                            data=c_docx_resp.content,
+                                            data=c_docx_bytes,
                                             file_name=f"development_report_candidate_{selected_cid}_job_{selected_job_id}.docx",
                                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                                             key=f"dl_cand_dev_docx_{selected_cid}",
@@ -1650,14 +1667,24 @@ def show_dashboard():
                         top_n = st.number_input("Top N Candidates", min_value=1, max_value=50, value=10, step=1, key="dev_batch_top_n")
                     with bc2:
                         st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
-                        batch_zip_resp = requests.get(
-                            f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/development-reports/batch-export?top_n={top_n}",
-                            headers={"Authorization": f"Bearer {token}"},
-                        )
-                        if batch_zip_resp.status_code == 200:
+                        if st.button("📦 Generate Batch Reports (ZIP)", key=f"btn_gen_batch_{selected_job_id}_{top_n}", use_container_width=True):
+                            with st.spinner("Generating batch reports and compressing into ZIP…"):
+                                batch_zip = _safe_fetch_file(
+                                    f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/development-reports/batch-export?top_n={top_n}",
+                                    token,
+                                    timeout=90,
+                                )
+                                if batch_zip:
+                                    st.session_state[f"batch_zip_{selected_job_id}_{top_n}"] = batch_zip
+                                    st.success(f"Generated reports for top {top_n} candidates!")
+                                else:
+                                    st.error("Failed to generate batch reports. Ensure backend is available.")
+
+                        cached_batch = st.session_state.get(f"batch_zip_{selected_job_id}_{top_n}")
+                        if cached_batch:
                             st.download_button(
-                                "📦 Generate Batch Reports (ZIP)",
-                                data=batch_zip_resp.content,
+                                "⬇ Download Generated ZIP",
+                                data=cached_batch,
                                 file_name=f"development_reports_top{top_n}_job_{selected_job_id}.zip",
                                 mime="application/zip",
                                 key=f"dl_batch_zip_{selected_job_id}_{top_n}",
@@ -1706,7 +1733,7 @@ def show_dashboard():
                     elif isinstance(res, dict) and "questions" in res:
                         st.session_state[f"iq_questions_{selected_job_id}"] = res
                     else:
-                        st.error("Failed to generate questions. Please ensure ANTHROPIC_API_KEY is configured.")
+                        st.error("Failed to generate questions. Please ensure an AI API key (SARVAM_API_KEY or ANTHROPIC_API_KEY) is configured in your .env file.")
 
             saved_q = st.session_state.get(f"iq_questions_{selected_job_id}")
             if saved_q and "questions" in saved_q:
@@ -1855,7 +1882,8 @@ def show_dashboard():
                                 st.session_state[f"session_data_{new_sess_id}"] = resp_res
                             st.rerun()
                         else:
-                            st.error(f"Failed to start session: {create_res.get('error', 'Unknown error')}")
+                            err_msg = create_res.get('error', 'Unknown error') if isinstance(create_res, dict) else str(create_res)
+                            st.error(f"Failed to start session: {err_msg}")
 
         with sim_btn_c2:
             if active_session_id:
@@ -1892,7 +1920,12 @@ def show_dashboard():
                             with st.chat_message("user"):
                                 st.markdown(content)
 
-                if session_data.get("status") != "completed":
+                if session_data.get("status") == "completed":
+                    st.markdown("<div style='padding:10px 14px;border-radius:6px;background:rgba(16,185,129,0.15);border:1px solid #10B981;color:#6ee7b7;font-size:13px;font-weight:600;margin-top:10px;'>✓ Interview session has been concluded.</div>", unsafe_allow_html=True)
+                    if st.button("Start Another Interview", key="btn_clear_sim_completed"):
+                        st.session_state.pop("active_interview_session_id", None)
+                        st.rerun()
+                else:
                     user_input = st.chat_input("Type candidate's response here...", key="interview_chat_input")
                     if user_input:
                         with st.spinner("Interviewer is evaluating and responding..."):
@@ -1943,10 +1976,17 @@ def show_dashboard():
                     if not sel_cand_id or not sel_pipe_job_id:
                         st.error("Please select both a candidate and a job position.")
                     else:
+                        sched_str = None
+                        if schedule_date:
+                            if hasattr(schedule_date, "isoformat"):
+                                sched_str = f"{schedule_date.isoformat()}T09:00:00"
+                            elif isinstance(schedule_date, (list, tuple)) and schedule_date and hasattr(schedule_date[0], "isoformat"):
+                                sched_str = f"{schedule_date[0].isoformat()}T09:00:00"
+
                         payload = {
                             "candidate_id": sel_cand_id,
                             "job_id": sel_pipe_job_id,
-                            "scheduled_at": f"{schedule_date.isoformat()}T09:00:00" if schedule_date else None,
+                            "scheduled_at": sched_str,
                         }
                         res = api_request("POST", "/api/interview-sessions", token=token, json=payload)
                         _handle_unauthorized(res)

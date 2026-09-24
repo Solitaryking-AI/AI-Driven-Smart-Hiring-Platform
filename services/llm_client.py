@@ -13,22 +13,11 @@ DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 
 def _load_env_file() -> None:
     """Load key-value pairs from .env in the project root."""
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_path = os.path.join(project_root, ".env")
-    if os.path.exists(env_path):
-        try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        k, v = line.split("=", 1)
-                        k = k.strip()
-                        v = v.strip().strip('"').strip("'")
-                        # Update os.environ if value is provided and not a placeholder
-                        if k and v and not v.startswith("your_"):
-                            os.environ[k] = v
-        except Exception:
-            pass
+    try:
+        import env_loader
+        env_loader.load_env()
+    except Exception:
+        pass
 
 
 def _call_sarvam(

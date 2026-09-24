@@ -4,6 +4,7 @@ import json
 import uvicorn
 from collections import Counter
 from datetime import datetime, timezone
+from contextlib import asynccontextmanager
 from typing import List, Optional, Literal
 
 import pandas as pd
@@ -32,10 +33,18 @@ from services import matching_engine, hiring_score, skill_gap_analysis, intervie
 import file_loader
 import parser
 
+
 # ---------------------------------------------------------------------------
-# App setup
+# App setup & lifespan
 # ---------------------------------------------------------------------------
-app = FastAPI(title="SmartHire AI Recruitment Copilot")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    os.makedirs("uploads", exist_ok=True)
+    yield
+
+
+app = FastAPI(title="SmartHire AI Recruitment Copilot", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -46,12 +55,6 @@ app.add_middleware(
 )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
-
-
-@app.on_event("startup")
-def on_startup():
-    init_db()
-    os.makedirs("uploads", exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +196,7 @@ async def upload_candidate(
 def get_candidates(
     search: Optional[str] = None,
     skip: int = 0,
-    limit: int = 100,
+    limit: int = Query(500, ge=1, le=10000),
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
@@ -260,6 +263,10 @@ def _job_to_dict(job: Job) -> dict:
     return {
         "job_id": job.job_id,
         "title": job.title,
+        "description": job.description,
+        "department": job.department,
+        "location": job.location,
+        "employment_type": job.employment_type,
         "required_skills": _parse_list(job.required_skills),
         "nice_to_have_skills": _parse_list(job.nice_to_have_skills),
         "min_experience_years": job.min_experience_years,
@@ -284,24 +291,7 @@ def get_candidates_hiring_scores(
         job = db.query(Job).filter(Job.job_id == job_id).first()
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
-
-        def _parse_job_skills(text):
-            if not text:
-                return []
-            try:
-                parsed = json.loads(text)
-                return parsed if isinstance(parsed, list) else []
-            except Exception:
-                return []
-
-        job_dict = {
-            "job_id": job.job_id,
-            "title": job.title,
-            "required_skills": _parse_job_skills(job.required_skills),
-            "nice_to_have_skills": _parse_job_skills(job.nice_to_have_skills),
-            "min_experience_years": job.min_experience_years,
-            "seniority": job.seniority,
-        }
+        job_dict = _job_to_dict(job)
 
     candidates = _load_candidates_as_dicts(db)
     results: List[HiringScoreBreakdown] = []
