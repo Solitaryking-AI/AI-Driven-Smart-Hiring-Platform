@@ -5,17 +5,28 @@ from typing import Optional, List, Dict, Any
 
 _client = None
 _cached_key = None
+_env_loaded = False
 
 SARVAM_COMPLETIONS_URL = "https://api.sarvam.ai/v1/chat/completions"
 DEFAULT_SARVAM_MODEL = "sarvam-105b"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 
+# Persistent session with HTTP keep-alive connection pooling
+_sarvam_session = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=1)
+_sarvam_session.mount("https://", _adapter)
+_sarvam_session.mount("http://", _adapter)
+
 
 def _load_env_file() -> None:
-    """Load key-value pairs from .env in the project root."""
+    """Load key-value pairs from .env in the project root (memoized)."""
+    global _env_loaded
+    if _env_loaded:
+        return
     try:
         import env_loader
         env_loader.load_env()
+        _env_loaded = True
     except Exception:
         pass
 
@@ -49,7 +60,7 @@ def _call_sarvam(
     }
 
     try:
-        res = requests.post(SARVAM_COMPLETIONS_URL, headers=headers, json=payload, timeout=90)
+        res = _sarvam_session.post(SARVAM_COMPLETIONS_URL, headers=headers, json=payload, timeout=60)
     except Exception as e:
         raise RuntimeError(f"Sarvam AI network request failed: {e}") from e
 

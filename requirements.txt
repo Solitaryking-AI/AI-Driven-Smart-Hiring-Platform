@@ -12,7 +12,7 @@ python-multipart==0.0.32
 sqlalchemy==2.0.52
 
 # Frontend
-streamlit==1.62.0
+streamlit>=1.60.0
 plotly==7.0.0
 
 # NLP & Parsing
@@ -35,4 +35,10 @@ email-validator>=2.0.0
 
 # LLM & AI
 anthropic>=0.40.0
+
+# Voice Interview
+SpeechRecognition==3.10.4
+pyttsx3==2.90
+audio-recorder-streamlit==0.0.10
+
 

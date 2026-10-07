@@ -3,521 +3,639 @@ import requests
 import pandas as pd
 import json
 import os
+import io
+import wave
+import hashlib
 from typing import Any, Dict, List, Optional
 import plotly.express as px
 import plotly.graph_objects as go
 from services import hiring_score as hiring_score_engine
 
 # ---------------------------------------------------------------------------
-# Page config
+# Page configuration
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="SmartHire AI | Recruitment Platform",
-    page_icon="S",
+    page_title="SmartHire AI | Enterprise ATS & Recruitment Platform",
+    page_icon="⚡",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 API_BASE_URL = "http://localhost:8000"
+CANDIDATE_FETCH_LIMIT = 20000
 
 # ---------------------------------------------------------------------------
-# CSS — Professional SaaS, dark navy + purple brand identity
+# Session state initialization
+# ---------------------------------------------------------------------------
+if "theme" not in st.session_state:
+    st.session_state["theme"] = "dark"
+
+if "active_nav" not in st.session_state:
+    st.session_state["active_nav"] = "Dashboard"
+
+# ---------------------------------------------------------------------------
+# Lucide-style Inline SVG Icon Helper
+# ---------------------------------------------------------------------------
+def render_svg(icon_name: str, size: int = 18, color: str = "currentColor") -> str:
+    icons = {
+        "dashboard": '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
+        "users": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+        "briefcase": '<rect width="20" height="14" x="2" y="7" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>',
+        "target": '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+        "chat": '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+        "analytics": '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+        "compass": '<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',
+        "upload": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
+        "settings": '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+        "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+        "moon": '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+        "check": '<polyline points="20 6 9 17 4 12"/>',
+        "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+        "filter": '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
+        "log-out": '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
+        "sparkles": '<path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/>',
+        "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
+        "trash": '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
+        "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+        "mic": '<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/>',
+        "volume": '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>',
+        "mail": '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+        "phone": '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>',
+        "clock": '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+        "award": '<circle cx="12" cy="8" r="6"/><path d="M15.477 12.89 17 22l-5-3-5 3 1.523-9.11"/>',
+    }
+    inner = icons.get(icon_name, '<circle cx="12" cy="12" r="10"/>')
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;">{inner}</svg>'''
+
+# ---------------------------------------------------------------------------
+# Plotly Theme Layout Helper
+# ---------------------------------------------------------------------------
+def get_plotly_layout(theme: str = "dark"):
+    is_dark = (theme == "dark")
+    font_color = "#F8FAFC" if is_dark else "#0F172A"
+    grid_color = "rgba(255,255,255,0.08)" if is_dark else "rgba(15, 23, 42, 0.06)"
+    bg_color = "rgba(0,0,0,0)"
+    return {
+        "template": "plotly_dark" if is_dark else "plotly_white",
+        "plot_bgcolor": bg_color,
+        "paper_bgcolor": bg_color,
+        "font": dict(family="Inter", color=font_color, size=12),
+        "gridcolor": grid_color,
+    }
+
+def _theme_primary() -> str:
+    return "#6366F1" if st.session_state.get("theme", "dark") == "dark" else "#2563EB"
+
+def _mic_neutral_color() -> str:
+    return "#4F46E5" if st.session_state.get("theme", "dark") == "dark" else "#2563EB"
+
+
+# ---------------------------------------------------------------------------
+# Centralized Design System & CSS Engine (Dual Theme Support)
 # ---------------------------------------------------------------------------
 def load_css():
-    st.markdown("""
+    theme = st.session_state.get("theme", "dark")
+    is_dark = (theme == "dark")
+
+    if is_dark:
+        bg_app        = "#0B1120"
+        bg_card       = "#111827"
+        bg_card_sub   = "#1A2234"
+        bg_input      = "#0F172A"
+        bg_sidebar    = "#0E1526"
+        border_col    = "rgba(255, 255, 255, 0.08)"
+        border_hover  = "rgba(255, 255, 255, 0.16)"
+        border_light  = "rgba(255, 255, 255, 0.05)"
+        text_primary  = "#F8FAFC"
+        text_muted    = "#94A3B8"
+        text_subtle   = "#64748B"
+        primary_col   = "#6366F1"
+        primary_hover = "#4F46E5"
+        primary_tint  = "rgba(99, 102, 241, 0.14)"
+        shadow_card   = "0 1px 3px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.24)"
+        avatar_bg     = "linear-gradient(135deg, #6366F1, #818CF8)"
+        success_bg    = "rgba(16, 185, 129, 0.15)"
+        success_text  = "#10B981"
+        warning_bg    = "rgba(245, 158, 11, 0.15)"
+        warning_text  = "#F59E0B"
+        danger_bg     = "rgba(244, 63, 94, 0.15)"
+        danger_text   = "#F43F5E"
+    else:
+        bg_app        = "#F6F8FC"
+        bg_card       = "#FFFFFF"
+        bg_card_sub   = "#F1F5F9"
+        bg_input      = "#FFFFFF"
+        bg_sidebar    = "#FFFFFF"
+        border_col    = "#D9E1EC"
+        border_hover  = "#CBD5E1"
+        border_light  = "#E7ECF3"
+        text_primary  = "#0F172A"
+        text_muted    = "#475569"
+        text_subtle   = "#64748B"
+        primary_col   = "#2563EB"
+        primary_hover = "#1D4ED8"
+        primary_tint  = "#EFF6FF"
+        shadow_card   = "0 1px 3px rgba(15, 23, 42, 0.05), 0 1px 2px rgba(15, 23, 42, 0.03)"
+        avatar_bg     = "linear-gradient(135deg, #2563EB, #3B82F6)"
+        success_bg    = "#ECFDF5"
+        success_text  = "#059669"
+        warning_bg    = "#FFFBEB"
+        warning_text  = "#D97706"
+        danger_bg     = "#FEF2F2"
+        danger_text   = "#DC2626"
+
+    st.markdown(f"""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
-    /* ── Reset & base ─────────────────────────────────────────────────── */
-    *, *::before, *::after { box-sizing: border-box; }
+    *, *::before, *::after {{ box-sizing: border-box; }}
 
-    html, body, .stApp {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-        background-color: #0f172a !important;
-        color: #f1f5f9;
+    :root {{
+        --background:        {bg_app};
+        --surface:           {bg_card};
+        --surface-secondary: {bg_card_sub};
+        --bg-app:            {bg_app};
+        --bg-card:           {bg_card};
+        --bg-card-sub:       {bg_card_sub};
+        --bg-input:          {bg_input};
+        --bg-sidebar:        {bg_sidebar};
+        --border:            {border_col};
+        --border-hover:      {border_hover};
+        --border-light:      {border_light};
+        --text-primary:      {text_primary};
+        --text-secondary:    {text_muted};
+        --text-muted:        {text_subtle};
+        --text-subtle:       {text_subtle};
+        --primary:           {primary_col};
+        --primary-hover:     {primary_hover};
+        --primary-light:     {primary_tint};
+        --primary-tint:      {primary_tint};
+        --shadow-card:       {shadow_card};
+        --radius:            10px;
+        --radius-sm:         6px;
+        --avatar-bg:         {avatar_bg};
+        --success:           #10B981;
+        --success-light:     {success_bg};
+        --success-text:      {success_text};
+        --warning:           #F59E0B;
+        --warning-light:     {warning_bg};
+        --warning-text:      {warning_text};
+        --danger:            #EF4444;
+        --danger-light:      {danger_bg};
+        --danger-text:       {danger_text};
+    }}
+
+    html, body, .stApp {{
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+        background-color: var(--background) !important;
+        color: var(--text-primary) !important;
         font-size: 14px;
-        line-height: 1.6;
-    }
+        line-height: 1.5;
+    }}
 
-    /* ── Design tokens ────────────────────────────────────────────────── */
-    :root {
-        --bg:        #0f172a;
-        --bg-card:   #1e293b;
-        --bg-input:  #0f172a;
-        --border:    rgba(255,255,255,0.07);
-        --border-md: rgba(255,255,255,0.12);
-        --primary:   #4F46E5;
-        --primary-h: #4338CA;
-        --primary-s: rgba(79,70,229,0.10);
-        --text:      #f1f5f9;
-        --muted:     #64748b;
-        --muted-2:   #94a3b8;
-        --success:   #10B981;
-        --warning:   #F59E0B;
-        --danger:    #F43F5E;
-        --radius:    8px;
-    }
+    .stApp > header {{ background: transparent !important; border-bottom: 1px solid var(--border) !important; }}
+    [data-testid="stSidebar"] {{
+        background: var(--bg-sidebar) !important;
+        border-right: 1px solid var(--border) !important;
+        width: 250px !important;
+    }}
+    [data-testid="stSidebarNav"] {{ display: none !important; }}
+    .block-container {{
+        padding: 24px 32px 48px !important;
+        max-width: 1360px !important;
+    }}
 
-    /* ── Streamlit chrome overrides ───────────────────────────────────── */
-    .stApp                         { background: var(--bg) !important; }
-    .stApp > header                { background: transparent !important; border-bottom: 1px solid var(--border); }
-    [data-testid="stSidebar"]      { background: #1a2234 !important; border-right: 1px solid var(--border) !important; width: 228px !important; }
-    [data-testid="stSidebarNav"]   { display: none; }
-    .block-container               { padding: 24px 28px !important; max-width: 1200px; }
+    @media (max-width: 768px) {{
+        .block-container {{ padding: 16px 14px 32px !important; }}
+    }}
 
-    /* ── Typography ───────────────────────────────────────────────────── */
-    h1, h2, h3, h4, h5, h6        { color: var(--text) !important; margin: 0; }
-    p, span, li, label             { color: var(--text) !important; }
-
-    .sh-page-title {
-        font-size: 20px;
+    h1, h2, h3, h4, h5, h6 {{
+        color: var(--text-primary) !important;
         font-weight: 600;
-        color: var(--text) !important;
-        letter-spacing: -0.3px;
-        margin: 0;
-        line-height: 1.3;
-    }
-    .sh-page-subtitle {
-        font-size: 13px;
-        color: var(--muted) !important;
-        margin-top: 2px;
-    }
-    .sh-section-label {
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--muted) !important;
-        margin: 20px 0 8px;
-        padding-left: 2px;
-    }
-    .sh-section-heading {
-        font-size: 15px;
-        font-weight: 600;
-        color: var(--text) !important;
-        margin: 0 0 4px;
-    }
+        margin: 0 0 6px;
+        letter-spacing: -0.02em;
+    }}
+    p, span, li, label {{ color: var(--text-primary); }}
 
-    /* ── Cards ────────────────────────────────────────────────────────── */
-    .sh-card {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        padding: 16px;
-        margin-bottom: 12px;
-    }
-    .sh-card-sm {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        padding: 12px 14px;
-    }
-
-    /* ── Stat row ─────────────────────────────────────────────────────── */
-    .sh-stats-row {
+    .sh-topbar {{
         display: flex;
-        gap: 1px;
-        background: var(--border);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        overflow: hidden;
+        justify-content: space-between;
+        align-items: center;
+        padding-bottom: 16px;
         margin-bottom: 20px;
-    }
-    .sh-stat-item {
-        flex: 1;
-        background: var(--bg-card);
-        padding: 14px 18px;
-    }
-    .sh-stat-value {
+        border-bottom: 1px solid var(--border);
+    }}
+    .sh-breadcrumb {{
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-secondary);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }}
+    .sh-breadcrumb strong {{ color: var(--text-primary); }}
+
+    .sh-page-header {{
+        margin-bottom: 24px;
+    }}
+    .sh-title {{
         font-size: 24px;
         font-weight: 700;
-        color: var(--text) !important;
-        line-height: 1.2;
-    }
-    .sh-stat-label {
-        font-size: 11px;
-        color: var(--muted) !important;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        margin-top: 2px;
-    }
+        color: var(--text-primary) !important;
+        letter-spacing: -0.03em;
+        line-height: 1.25;
+        margin: 0;
+    }}
+    .sh-subtitle {{
+        font-size: 13px;
+        color: var(--text-secondary) !important;
+        margin-top: 4px;
+    }}
 
-    /* ── Sidebar elements ─────────────────────────────────────────────── */
-    .sh-brand {
-        padding: 16px 16px 12px;
-        border-bottom: 1px solid var(--border);
+    .sh-card {{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 20px 22px;
+        box-shadow: var(--shadow-card);
+        margin-bottom: 16px;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }}
+    .sh-card:hover {{
+        border-color: var(--border-hover);
+    }}
+    .sh-card-sm {{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 14px 16px;
+        margin-bottom: 12px;
+    }}
+
+    .sh-stat-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 16px;
+        margin-bottom: 24px;
+    }}
+    .sh-stat-card {{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 18px 20px;
+        box-shadow: var(--shadow-card);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+    }}
+    .sh-stat-top {{
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
         margin-bottom: 8px;
-    }
-    .sh-brand-name {
+    }}
+    .sh-stat-label {{
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-secondary);
+    }}
+    .sh-stat-value {{
+        font-size: 28px;
+        font-weight: 700;
+        color: var(--text-primary) !important;
+        line-height: 1.2;
+        letter-spacing: -0.02em;
+    }}
+    .sh-stat-pill {{
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+    }}
+    .sh-stat-pill-success {{ background: var(--success-light); color: var(--success-text); }}
+    .sh-stat-pill-info    {{ background: var(--primary-light); color: var(--primary); }}
+    .sh-stat-pill-warning {{ background: var(--warning-light); color: var(--warning-text); }}
+    .sh-stat-pill-danger  {{ background: var(--danger-light); color: var(--danger-text); }}
+    .sh-stat-pill-neutral {{ background: var(--surface-secondary); color: var(--text-secondary); }}
+
+    .sh-nav-group-label {{
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        padding: 14px 12px 6px;
+    }}
+    .sh-brand-box {{
+        padding: 16px 14px 14px;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }}
+    .sh-brand-title {{
         font-size: 15px;
         font-weight: 700;
-        color: var(--text) !important;
-        letter-spacing: -0.2px;
-    }
-    .sh-brand-sub {
-        font-size: 11px;
-        color: var(--muted) !important;
-        margin-top: 1px;
-    }
-    .sh-user-block {
-        padding: 12px 16px;
-        border-top: 1px solid var(--border);
-        margin-top: 8px;
-    }
-    .sh-user-name {
-        font-size: 13px;
-        font-weight: 600;
-        color: var(--text) !important;
-    }
-    .sh-user-meta {
-        font-size: 11px;
-        color: var(--muted) !important;
-        margin-top: 1px;
-    }
+        color: var(--text-primary);
+        letter-spacing: -0.02em;
+        line-height: 1.2;
+    }}
+    .sh-brand-badge {{
+        font-size: 10px;
+        font-weight: 700;
+        padding: 1px 6px;
+        border-radius: 4px;
+        background: var(--primary-light);
+        color: var(--primary);
+    }}
 
-    /* ── Buttons ──────────────────────────────────────────────────────── */
-    .stButton > button {
+    [data-testid="stSidebar"] .stButton > button {{
+        background: transparent !important;
+        border: 1px solid transparent !important;
+        color: var(--text-secondary) !important;
+        font-size: 13px !important;
+        font-weight: 500 !important;
+        padding: 7px 12px !important;
+        height: 36px !important;
+        text-align: left !important;
+        width: 100% !important;
+        border-radius: var(--radius-sm) !important;
+        justify-content: flex-start !important;
+        transition: all 0.12s ease !important;
+    }}
+    [data-testid="stSidebar"] .stButton > button:hover {{
+        background: var(--surface-secondary) !important;
+        color: var(--text-primary) !important;
+    }}
+    [data-testid="stSidebar"] .stButton > button[kind="primary"] {{
+        background: var(--primary-light) !important;
+        color: var(--primary) !important;
+        border-left: 3px solid var(--primary) !important;
+        font-weight: 600 !important;
+    }}
+
+    .stButton > button {{
         background: var(--primary) !important;
-        color: #fff !important;
-        border: none !important;
-        border-radius: var(--radius) !important;
+        color: #ffffff !important;
+        border: 1px solid var(--primary) !important;
+        border-radius: var(--radius-sm) !important;
         font-size: 13px !important;
         font-weight: 500 !important;
         padding: 7px 16px !important;
-        height: 34px !important;
-        line-height: 1 !important;
-        transition: background 0.15s ease !important;
-        box-shadow: none !important;
-        letter-spacing: 0.01em;
-    }
-    .stButton > button:hover {
-        background: var(--primary-h) !important;
-        transform: none !important;
-        box-shadow: none !important;
-    }
-    /* Secondary / ghost button — apply via key prefix trick */
-    .stButton.sh-btn-secondary > button {
-        background: transparent !important;
-        border: 1px solid var(--border-md) !important;
-        color: var(--muted-2) !important;
-    }
-    .stButton.sh-btn-secondary > button:hover {
-        border-color: var(--primary) !important;
-        color: var(--text) !important;
-    }
-    /* Sidebar nav buttons */
-    [data-testid="stSidebar"] .stButton > button {
-        background: transparent !important;
-        border: none !important;
-        color: var(--muted-2) !important;
-        font-size: 13px !important;
-        font-weight: 400 !important;
-        padding: 6px 12px !important;
-        height: 32px !important;
-        text-align: left !important;
-        width: 100% !important;
-        border-radius: 6px !important;
-        justify-content: flex-start !important;
-    }
-    [data-testid="stSidebar"] .stButton > button:hover {
-        background: var(--primary-s) !important;
-        color: var(--text) !important;
-    }
-    /* Danger button */
-    [data-testid="stSidebar"] .stButton > button.sh-danger {
-        color: var(--danger) !important;
-    }
+        height: 36px !important;
+        transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease !important;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.06) !important;
+    }}
+    .stButton > button:hover {{
+        background: var(--primary-hover) !important;
+        border-color: var(--primary-hover) !important;
+    }}
+    .stButton > button[kind="secondary"] {{
+        background: var(--surface) !important;
+        border: 1px solid var(--border) !important;
+        color: var(--text-primary) !important;
+    }}
+    .stButton > button[kind="secondary"]:hover {{
+        border-color: var(--border-hover) !important;
+        background: var(--surface-secondary) !important;
+    }}
 
-    /* ── Inputs ───────────────────────────────────────────────────────── */
-    .stTextInput > div > div > input,
-    .stTextArea > div > div > textarea,
-    .stSelectbox > div > div > div,
-    .stMultiselect > div > div {
-        background: var(--bg-input) !important;
-        border: 1px solid var(--border-md) !important;
-        border-radius: var(--radius) !important;
-        color: var(--text) !important;
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 8px;
+        background-color: transparent !important;
+        border-bottom: 1px solid var(--border) !important;
+        padding-bottom: 0px !important;
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        height: 38px !important;
+        white-space: pre-wrap !important;
+        background-color: transparent !important;
+        border-radius: 6px 6px 0 0 !important;
+        color: var(--text-secondary) !important;
+        font-weight: 500 !important;
         font-size: 13px !important;
-    }
-    .stTextInput > div > div > input:focus,
-    .stTextArea > div > div > textarea:focus {
+        padding: 8px 16px !important;
+        border: none !important;
+        transition: color 0.15s ease, background 0.15s ease !important;
+    }}
+    .stTabs [data-baseweb="tab"]:hover {{
+        color: var(--primary) !important;
+        background-color: var(--primary-light) !important;
+    }}
+    .stTabs [aria-selected="true"] {{
+        color: var(--primary) !important;
+        font-weight: 600 !important;
+        border-bottom: 2px solid var(--primary) !important;
+    }}
+    .stTabs [data-baseweb="tab-highlight"] {{
+        background-color: var(--primary) !important;
+    }}
+
+    .stTextInput input, .stTextArea textarea, .stSelectbox select, [data-baseweb="select"] {{
+        background: var(--bg-input) !important;
+        border: 1px solid var(--border) !important;
+        border-radius: var(--radius-sm) !important;
+        color: var(--text-primary) !important;
+        font-size: 13px !important;
+    }}
+    .stTextInput input:focus, .stTextArea textarea:focus {{
         border-color: var(--primary) !important;
-        box-shadow: 0 0 0 2px rgba(79,70,229,0.15) !important;
-    }
-    .stTextInput label, .stSelectbox label,
-    .stMultiselect label, .stTextArea label,
-    .stFileUploader label {
+        box-shadow: 0 0 0 3px var(--primary-light) !important;
+    }}
+    [data-baseweb="select"] > div {{
+        background: var(--bg-input) !important;
+        border-color: var(--border) !important;
+        color: var(--text-primary) !important;
+    }}
+    [data-baseweb="select"] > div:focus-within {{
+        border-color: var(--primary) !important;
+        box-shadow: 0 0 0 3px var(--primary-light) !important;
+    }}
+    [data-baseweb="popover"], [data-baseweb="menu"] {{
+        background: var(--surface) !important;
+        border: 1px solid var(--border) !important;
+    }}
+    label {{
         font-size: 12px !important;
         font-weight: 500 !important;
-        color: var(--muted-2) !important;
+        color: var(--text-secondary) !important;
         margin-bottom: 4px !important;
-    }
+    }}
 
-    /* ── File uploader ────────────────────────────────────────────────── */
-    [data-testid="stFileUploader"] {
-        background: var(--bg-card) !important;
-        border: 1px dashed var(--border-md) !important;
-        border-radius: var(--radius) !important;
-        padding: 24px !important;
-    }
-    [data-testid="stFileUploader"] > div {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 6px;
-    }
-    [data-testid="stFileUploaderDropzoneInstructions"] span {
-        font-size: 13px !important;
-        color: var(--muted-2) !important;
-    }
-    [data-testid="stFileUploaderDropzoneInstructions"] small {
-        font-size: 11px !important;
-        color: var(--muted) !important;
-    }
-
-    /* ── Tabs ─────────────────────────────────────────────────────────── */
-    [data-testid="stTabs"] [data-baseweb="tab-list"] {
-        background: transparent !important;
-        border-bottom: 1px solid var(--border) !important;
-        gap: 0 !important;
-        padding: 0 !important;
-    }
-    [data-testid="stTabs"] [data-baseweb="tab"] {
+    [data-testid="stRadio"] label {{
+        color: var(--text-primary) !important;
         font-size: 13px !important;
         font-weight: 500 !important;
-        color: var(--muted) !important;
-        padding: 8px 16px !important;
-        border-bottom: 2px solid transparent !important;
-        background: transparent !important;
-        border-radius: 0 !important;
-        margin-right: 0 !important;
-    }
-    [data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] {
+    }}
+    [data-testid="stRadio"] div[role="radiogroup"] > label:hover {{
+        background-color: var(--surface-secondary) !important;
+        border-radius: var(--radius-sm) !important;
+    }}
+    [data-testid="stRadio"] [aria-checked="true"] {{
         color: var(--primary) !important;
-        border-bottom-color: var(--primary) !important;
-    }
-    [data-testid="stTabs"] [data-baseweb="tab-highlight"] { display: none; }
-    [data-testid="stTabs"] [data-baseweb="tab-border"]    { display: none; }
+    }}
+    [data-testid="stRadio"] [data-baseweb="radio"] input:checked + div {{
+        border-color: var(--primary) !important;
+        background-color: var(--primary) !important;
+    }}
 
-    /* ── Expanders ────────────────────────────────────────────────────── */
-    [data-testid="stExpander"] {
-        border: 1px solid var(--border) !important;
-        border-radius: var(--radius) !important;
-        background: var(--bg-card) !important;
-        margin-bottom: 6px !important;
-    }
-    [data-testid="stExpander"] summary {
-        background: transparent !important;
-        border-radius: var(--radius) !important;
-        font-size: 13px !important;
-        font-weight: 500 !important;
-        color: var(--text) !important;
-        padding: 10px 14px !important;
-    }
-    [data-testid="stExpander"] summary:hover {
-        background: var(--primary-s) !important;
-    }
-    [data-testid="stExpander"] > div:last-child {
-        padding: 0 14px 12px !important;
-        border-top: 1px solid var(--border) !important;
-    }
-
-    /* ── Dataframes ───────────────────────────────────────────────────── */
-    [data-testid="stDataFrame"] {
-        border: 1px solid var(--border) !important;
-        border-radius: var(--radius) !important;
-        overflow: hidden;
-    }
-    .stDataFrame iframe {
-        border-radius: var(--radius) !important;
-    }
-
-    /* ── Progress bar ─────────────────────────────────────────────────── */
-    .stProgress > div > div > div {
-        background: var(--primary) !important;
-        height: 3px !important;
-        border-radius: 99px !important;
-    }
-    .stProgress > div > div {
-        background: rgba(255,255,255,0.06) !important;
-        border-radius: 99px !important;
-        height: 3px !important;
-    }
-
-    /* ── Alerts / info boxes ──────────────────────────────────────────── */
-    [data-testid="stAlert"] {
-        border-radius: var(--radius) !important;
-        font-size: 13px !important;
-        border-left-width: 3px !important;
-    }
-
-    /* ── Skill badges ─────────────────────────────────────────────────── */
-    .sh-badge {
-        display: inline-block;
+    .sh-badge {{
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
         font-size: 11px;
         font-weight: 500;
         padding: 2px 8px;
         border-radius: 4px;
-        margin: 2px 3px 2px 0;
-        letter-spacing: 0.01em;
-    }
-    .sh-badge-primary  { background: rgba(79,70,229,0.18); color: #a5b4fc !important; }
-    .sh-badge-success  { background: rgba(16,185,129,0.15); color: #6ee7b7 !important; }
-    .sh-badge-danger   { background: rgba(244,63,94,0.15);  color: #fda4af !important; }
-    .sh-badge-neutral  { background: rgba(255,255,255,0.06); color: var(--muted-2) !important; }
+        margin: 2px 4px 2px 0;
+        line-height: 1.4;
+    }}
+    .sh-badge-primary  {{ background: var(--primary-light); color: var(--primary); }}
+    .sh-badge-success  {{ background: var(--success-light); color: var(--success-text); }}
+    .sh-badge-warning  {{ background: var(--warning-light); color: var(--warning-text); }}
+    .sh-badge-danger   {{ background: var(--danger-light);  color: var(--danger-text); }}
+    .sh-badge-neutral  {{ background: var(--surface-secondary); color: var(--text-secondary); border: 1px solid var(--border); }}
 
-    /* ── Score badge ──────────────────────────────────────────────────── */
-    .sh-score-high   { display:inline-block; font-size:12px; font-weight:700; padding:2px 8px; border-radius:4px; background:rgba(16,185,129,0.15); color:#6ee7b7 !important; }
-    .sh-score-mid    { display:inline-block; font-size:12px; font-weight:700; padding:2px 8px; border-radius:4px; background:rgba(245,158,11,0.15); color:#fcd34d !important; }
-    .sh-score-low    { display:inline-block; font-size:12px; font-weight:700; padding:2px 8px; border-radius:4px; background:rgba(244,63,94,0.15);  color:#fda4af !important; }
+    .sh-score-high {{
+        display: inline-block; font-size: 12px; font-weight: 700; padding: 2px 8px;
+        border-radius: 4px; background: var(--success-light); color: var(--success-text);
+    }}
+    .sh-score-mid {{
+        display: inline-block; font-size: 12px; font-weight: 700; padding: 2px 8px;
+        border-radius: 4px; background: var(--warning-light); color: var(--warning-text);
+    }}
+    .sh-score-low {{
+        display: inline-block; font-size: 12px; font-weight: 700; padding: 2px 8px;
+        border-radius: 4px; background: var(--danger-light); color: var(--danger-text);
+    }}
 
-    /* ── Candidate row (custom HTML) ──────────────────────────────────── */
-    .sh-cand-row {
-        display: flex;
-        align-items: center;
-        padding: 10px 14px;
-        border-bottom: 1px solid var(--border);
-        gap: 12px;
-        transition: background 0.1s;
-    }
-    .sh-cand-row:last-child { border-bottom: none; }
-    .sh-cand-row:hover { background: var(--primary-s); }
-    .sh-cand-name  { font-size: 13px; font-weight: 600; color: var(--text) !important; min-width: 160px; }
-    .sh-cand-email { font-size: 12px; color: var(--muted) !important; min-width: 180px; }
-    .sh-cand-skills { flex: 1; }
-    .sh-cand-source { font-size: 11px; color: var(--muted) !important; min-width: 120px; }
-
-    /* ── Match result row ─────────────────────────────────────────────── */
-    .sh-match-row {
-        display: flex;
-        align-items: flex-start;
-        padding: 14px 16px;
+    .sh-cand-card {{
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: var(--radius);
-        margin-bottom: 8px;
-        background: var(--bg-card);
+        padding: 14px 18px;
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
         gap: 16px;
-    }
-    .sh-match-info { flex: 1; }
-    .sh-match-name { font-size: 14px; font-weight: 600; color: var(--text) !important; margin-bottom: 2px; }
-    .sh-match-email { font-size: 12px; color: var(--muted) !important; margin-bottom: 6px; }
-    .sh-match-subscores { font-size: 11px; color: var(--muted) !important; margin-top: 2px; margin-bottom: 6px; }
-    .sh-match-subscores b { color: var(--muted-2) !important; font-weight: 600; }
-    .sh-match-score-col { text-align: right; min-width: 60px; }
-    .sh-progress-track {
+        box-shadow: var(--shadow-card);
+        transition: border-color 0.15s ease;
+    }}
+    .sh-cand-card:hover {{
+        border-color: var(--border-hover);
+    }}
+    .sh-avatar {{
+        width: 38px;
+        height: 38px;
+        border-radius: 50%;
+        background: var(--avatar-bg);
+        color: #ffffff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 13px;
+        flex-shrink: 0;
+    }}
+
+    .sh-drawer-header {{
+        background: var(--surface-secondary);
+        border: 1px solid var(--border);
+        border-radius: var(--radius) var(--radius) 0 0;
+        padding: 18px 22px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }}
+    .sh-drawer-body {{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-top: none;
+        border-radius: 0 0 var(--radius) var(--radius);
+        padding: 22px;
+        margin-bottom: 24px;
+        box-shadow: var(--shadow-card);
+    }}
+
+    .sh-kanban-col {{
+        background: var(--surface-secondary);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 14px;
+        min-height: 480px;
+    }}
+    .sh-kanban-header {{
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--border);
+    }}
+    .sh-kanban-title {{
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-primary);
+    }}
+    .sh-kanban-badge {{
+        font-size: 11px;
+        font-weight: 700;
+        padding: 1px 7px;
+        border-radius: 999px;
+        background: var(--border);
+        color: var(--text-muted);
+    }}
+
+    .sh-progress-track {{
         width: 100%;
-        height: 3px;
-        background: rgba(255,255,255,0.08);
+        height: 4px;
+        background: var(--surface-secondary);
         border-radius: 99px;
         margin-top: 8px;
         overflow: hidden;
-    }
-    .sh-progress-fill { height: 3px; border-radius: 99px; }
+    }}
+    .sh-progress-fill {{ height: 4px; border-radius: 99px; }}
 
-    /* ── Auth pages ───────────────────────────────────────────────────── */
-    .sh-auth-logo {
-        font-size: 22px;
-        font-weight: 700;
-        color: var(--primary) !important;
-        letter-spacing: -0.5px;
-        margin-bottom: 2px;
-    }
-    .sh-auth-sub {
-        font-size: 13px;
-        color: var(--muted) !important;
-        margin-bottom: 24px;
-    }
-    .sh-auth-card {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 28px 28px 24px;
-    }
-    .sh-form-heading {
-        font-size: 16px;
-        font-weight: 600;
-        color: var(--text) !important;
-        margin-bottom: 16px;
-    }
-    .sh-divider {
-        height: 1px;
-        background: var(--border);
-        margin: 16px 0;
-    }
+    hr {{
+        border: none !important;
+        border-top: 1px solid var(--border) !important;
+        margin: 16px 0 !important;
+    }}
 
-    /* ── Upload file list ─────────────────────────────────────────────── */
-    .sh-file-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 8px 12px;
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        margin-bottom: 6px;
-        background: var(--bg-card);
-        font-size: 12px;
-    }
-    .sh-file-name { color: var(--text) !important; font-weight: 500; }
-    .sh-file-size { color: var(--muted) !important; }
-
-    /* ── Tables (candidate table header) ─────────────────────────────── */
-    .sh-table-header {
-        display: flex;
-        align-items: center;
-        padding: 8px 14px;
-        border-bottom: 1px solid var(--border);
-        gap: 12px;
-        background: var(--bg-card);
-        border-radius: 8px 8px 0 0;
-    }
-    .sh-th {
-        font-size: 11px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        color: var(--muted) !important;
-    }
-    .sh-th-name  { min-width: 160px; }
-    .sh-th-email { min-width: 180px; }
-    .sh-th-skills { flex: 1; }
-    .sh-th-source { min-width: 120px; }
-
-    /* ── Misc ─────────────────────────────────────────────────────────── */
-    .sh-separator { height: 1px; background: var(--border); margin: 16px 0; }
-    hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
-    [data-testid="stSpinner"] { color: var(--primary) !important; }
-    .stDownloadButton > button {
-        background: transparent !important;
-        border: 1px solid var(--border-md) !important;
-        color: var(--muted-2) !important;
-        font-size: 12px !important;
-        padding: 5px 14px !important;
-        height: 30px !important;
-        border-radius: var(--radius) !important;
-    }
-    .stDownloadButton > button:hover {
-        border-color: var(--primary) !important;
-        color: var(--text) !important;
-        background: var(--primary-s) !important;
-    }
-    /* Hide Streamlit branding */
-    [data-testid="stDecoration"]   { display: none; }
-    footer                         { display: none; }
-    #MainMenu                      { display: none; }
+    [data-testid="stDecoration"] {{ display: none !important; }}
+    footer {{ display: none !important; }}
+    #MainMenu {{ display: none !important; }}
     </style>
     """, unsafe_allow_html=True)
 
+# ---------------------------------------------------------------------------
+# API Session & Connection Pooling
+# ---------------------------------------------------------------------------
+_HTTP_SESSION = requests.Session()
+_http_adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=50, max_retries=1)
+_HTTP_SESSION.mount("http://", _http_adapter)
+_HTTP_SESSION.mount("https://", _http_adapter)
 
-# ---------------------------------------------------------------------------
-# API helper
-# ---------------------------------------------------------------------------
 def api_request(method: str, endpoint: str, token: str = None, **kwargs):
     url = f"{API_BASE_URL}{endpoint}"
     headers = kwargs.pop("headers", {})
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        resp = requests.request(method, url, headers=headers, **kwargs)
+        resp = _HTTP_SESSION.request(method, url, headers=headers, **kwargs)
         if resp.status_code == 401:
+            if endpoint in ("/api/auth/login", "/api/auth/register"):
+                try:
+                    detail = resp.json().get("detail", "Incorrect email or password.")
+                except Exception:
+                    detail = "Incorrect email or password."
+                return {"error": detail}
             return {"error": "Session expired. Please log in again.", "__unauthorized": True}
         if resp.status_code >= 400:
             try:
@@ -530,23 +648,152 @@ def api_request(method: str, endpoint: str, token: str = None, **kwargs):
         except Exception:
             return {"success": True}
     except requests.exceptions.ConnectionError:
-        return {"error": "Cannot connect to backend. Make sure the FastAPI server is running on http://localhost:8000"}
+        return {"error": "Cannot connect to backend. Make sure FastAPI is running on http://localhost:8000"}
     except Exception as e:
         return {"error": str(e)}
 
-
 def _handle_unauthorized(res: dict):
     if isinstance(res, dict) and res.get("__unauthorized"):
+        st.session_state["session_expired_message"] = "Session expired. Please log in again."
         for key in ("auth_token", "user"):
             st.session_state.pop(key, None)
-        st.error("Your session has expired. Please log in again.")
+        for key in (
+            "cand_active_mock_id",
+            "active_interview_session_id",
+            "practice_feedback_cache",
+            "latest_resume_analysis",
+            "quick_match_res",
+            "selected_candidate_id",
+        ):
+            st.session_state.pop(key, None)
         st.rerun()
 
+# ---------------------------------------------------------------------------
+# Data Caching & Strict Deduplication Helpers
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=60, show_spinner=False)
+def get_cached_candidates(token: str, limit: int):
+    candidates_res = api_request(
+        "GET", "/api/candidates", token=token,
+        params={"limit": limit},
+    )
+    candidates = []
+    if not (isinstance(candidates_res, dict) and "error" in candidates_res):
+        candidates = (candidates_res.get("candidates", [])
+                      if isinstance(candidates_res, dict) else candidates_res)
+        if not isinstance(candidates, list):
+            candidates = []
+
+    seen_ids = set()
+    seen_identities = set()
+    deduped = []
+    for c in candidates:
+        cid = c.get("candidate_id")
+        name_str = str(c.get("name", "")).strip().lower()
+        email_str = str(c.get("email", "")).strip().lower()
+        ident = (name_str, email_str)
+
+        if cid is not None and cid in seen_ids:
+            continue
+        if name_str and email_str and ident in seen_identities:
+            continue
+        if cid is not None:
+            seen_ids.add(cid)
+        if name_str and email_str:
+            seen_identities.add(ident)
+        deduped.append(c)
+
+    candidates = deduped
+    for c in candidates:
+        if "hiring_score" not in c:
+            c["hiring_score"] = hiring_score_engine.calculate_hiring_score(c)["hiring_score"]
+
+    all_skills = [s for c in candidates for s in c.get("skills", [])]
+    return candidates_res, candidates, all_skills
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_cached_analytics_summary(token: str):
+    return api_request("GET", "/api/analytics/summary", token=token)
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_cached_jobs(token: str):
+    jobs_res = api_request("GET", "/api/jobs", token=token)
+    return jobs_res if isinstance(jobs_res, list) else []
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_cached_analytics_skills(token: str):
+    return api_request("GET", "/api/analytics/skills", token=token)
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_cached_skill_gap_report(job_id: int, token: str):
+    return api_request("GET", f"/api/jobs/{job_id}/skill-gap-report", token=token)
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_cached_candidate_gap(job_id: int, cid: int, token: str):
+    return api_request("GET", f"/api/jobs/{job_id}/skill-gap-report/candidates/{cid}", token=token)
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_cached_candidate_development_report(job_id: int, cid: int, token: str):
+    return api_request("GET", f"/api/jobs/{job_id}/skill-gap-report/candidates/{cid}/development-report", token=token)
+
+def invalidate_candidate_caches():
+    get_cached_candidates.clear()
+    get_cached_analytics_summary.clear()
+    get_cached_analytics_skills.clear()
+    get_cached_skill_gap_report.clear()
+    get_cached_candidate_gap.clear()
+    get_cached_candidate_development_report.clear()
+
+def invalidate_job_caches():
+    get_cached_jobs.clear()
+    get_cached_skill_gap_report.clear()
+    get_cached_candidate_gap.clear()
+    get_cached_candidate_development_report.clear()
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Formatting, Voice & Scoring Helpers
 # ---------------------------------------------------------------------------
-ROLES = ["Recruiter", "HR Manager", "Admin"]
+ROLES = ["Candidate", "Recruiter", "HR Manager", "Admin"]
+_TTS_CACHE: Dict[str, bytes] = {}
+
+def _text_to_speech_bytes(text: str) -> bytes | None:
+    if not text or not text.strip():
+        return None
+    cache_key = hashlib.md5(text.strip().encode("utf-8")).hexdigest()
+    if cache_key in _TTS_CACHE:
+        return _TTS_CACHE[cache_key]
+    try:
+        import pyttsx3
+        import tempfile
+        engine = pyttsx3.init()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+        engine.save_to_file(text, tmp_path)
+        engine.runAndWait()
+        with open(tmp_path, "rb") as f:
+            audio_bytes = f.read()
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        if audio_bytes:
+            if len(_TTS_CACHE) > 100:
+                _TTS_CACHE.clear()
+            _TTS_CACHE[cache_key] = audio_bytes
+        return audio_bytes
+    except Exception:
+        return None
+
+def _speech_to_text(audio_bytes: bytes) -> str | None:
+    try:
+        import speech_recognition as sr
+        recognizer = sr.Recognizer()
+        recognizer.operation_timeout = 10
+        with sr.AudioFile(io.BytesIO(audio_bytes)) as source:
+            audio_data = recognizer.record(source)
+        return recognizer.recognize_google(audio_data)
+    except Exception:
+        return None
 
 def _display_name(name: Any, default: str = "Unknown Candidate") -> str:
     if not name or str(name).strip().lower() in ("none", "null", "nan", ""):
@@ -558,13 +805,21 @@ def _display_email(email: Any, default: str = "—") -> str:
         return default
     return str(email).strip()
 
+def _get_avatar_initials(name: str) -> str:
+    parts = name.strip().split()
+    if not parts or parts[0] == "Unknown":
+        return "C"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[-1][0]).upper()
+
 def _score_badge(score: float) -> str:
     cls = "sh-score-high" if score >= 70 else "sh-score-mid" if score >= 40 else "sh-score-low"
     return f"<span class='{cls}'>{score:.0f}%</span>"
 
 def _hiring_score_badge(score: float) -> str:
     cls = "sh-score-high" if score >= 75 else "sh-score-mid" if score >= 55 else "sh-score-low"
-    return f"<span class='{cls}'>HS: {score:.0f}%</span>"
+    return f"<span class='{cls}'>Hiring Score: {score:.0f}%</span>"
 
 def _score_bar_color(score: float) -> str:
     return "#10B981" if score >= 70 else "#F59E0B" if score >= 40 else "#F43F5E"
@@ -579,1478 +834,1904 @@ def _skill_badges(skills: list, variant: str = "primary", limit: int = 0) -> str
 def _fmt_bytes(n: int) -> str:
     return f"{n/1024:.0f} KB" if n >= 1024 else f"{n} B"
 
-
 def _safe_fetch_file(url: str, token: str, timeout: int = 15) -> Optional[bytes]:
-    """Safely fetch file bytes from API with timeout and error suppression."""
     try:
-        r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
+        r = _HTTP_SESSION.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
         if r.status_code == 200:
             return r.content
     except Exception:
         pass
     return None
 
+# ---------------------------------------------------------------------------
+# Topbar Component
+# ---------------------------------------------------------------------------
+def render_recruiter_topbar(breadcrumb: str, title: str, subtitle: str):
+    st.markdown(f"""
+    <div class='sh-topbar'>
+        <div class='sh-breadcrumb'>
+            {render_svg('sparkles', 14, _theme_primary())}
+            <span>SmartHire AI</span>
+            <span>/</span>
+            <strong>{breadcrumb}</strong>
+        </div>
+        <div style='display:flex;align-items:center;gap:12px;'>
+            <span class='sh-stat-pill sh-stat-pill-info'>Production ATS v2.4</span>
+        </div>
+    </div>
+    <div class='sh-page-header'>
+        <h1 class='sh-title'>{title}</h1>
+        <div class='sh-subtitle'>{subtitle}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Auth — Login
+# Candidate Detail Drawer Component
+# ---------------------------------------------------------------------------
+def show_candidate_drawer(candidate: dict, jobs_list: list, token: str):
+    cid = candidate.get("candidate_id")
+    name = _display_name(candidate.get("name"))
+    email = _display_email(candidate.get("email"))
+    phone = candidate.get("phone") or "Not provided"
+    hs = candidate.get("hiring_score", 0.0)
+    resume_file = candidate.get("resume_path") or "Direct Submission"
+    skills = candidate.get("skills", [])
+    exp_list = candidate.get("experience", [])
+    edu_list = candidate.get("education", [])
+
+    st.markdown(f"""
+    <div class='sh-drawer-header'>
+        <div style='display:flex;align-items:center;gap:14px;'>
+            <div class='sh-avatar'>{_get_avatar_initials(name)}</div>
+            <div>
+                <div style='font-size:17px;font-weight:700;color:var(--text-primary);'>{name}</div>
+                <div style='font-size:12px;color:var(--text-muted);'>{email} · {phone}</div>
+            </div>
+        </div>
+        <div>
+            {_hiring_score_badge(hs)}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.container():
+        st.markdown("<div class='sh-drawer-body'>", unsafe_allow_html=True)
+
+        d_col1, d_col2 = st.columns([1.5, 1])
+        with d_col1:
+            st.markdown("<h4 style='font-size:14px;margin-bottom:8px;'>5-Pillar AI Hiring Assessment</h4>", unsafe_allow_html=True)
+            breakdown = hiring_score_engine.calculate_hiring_score(candidate).get("component_scores", {})
+            for comp, score_val in breakdown.items():
+                comp_title = comp.replace("_", " ").title()
+                st.markdown(f"""
+                <div style='display:flex;justify-content:space-between;font-size:12px;color:var(--text-muted);margin-bottom:2px;'>
+                    <span>{comp_title}</span>
+                    <span style='font-weight:600;color:var(--text-primary);'>{score_val:.0f}%</span>
+                </div>
+                """, unsafe_allow_html=True)
+                st.progress(score_val / 100.0)
+
+            st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+            st.markdown("<h4 style='font-size:14px;margin-bottom:8px;'>Extracted Technical Skills</h4>", unsafe_allow_html=True)
+            if skills:
+                st.markdown(_skill_badges(skills, "primary"), unsafe_allow_html=True)
+            else:
+                st.caption("No technical skills detected.")
+
+        with d_col2:
+            st.markdown("<h4 style='font-size:14px;margin-bottom:8px;'>Candidate Profile Meta</h4>", unsafe_allow_html=True)
+            st.markdown(f"""
+            <div class='sh-card-sm' style='margin-bottom:12px;'>
+                <div style='font-size:11px;color:var(--text-subtle);text-transform:uppercase;'>Resume Source</div>
+                <div style='font-size:13px;font-weight:500;margin-top:2px;'>{resume_file}</div>
+                <div style='font-size:11px;color:var(--text-subtle);text-transform:uppercase;margin-top:10px;'>Candidate ID</div>
+                <div style='font-size:13px;font-weight:500;margin-top:2px;'>#{cid}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            action_c1, action_c2 = st.columns(2)
+            with action_c1:
+                if st.button("Close Profile", key="btn_close_drawer", use_container_width=True, type="secondary"):
+                    st.session_state.pop("selected_candidate_id", None)
+                    st.rerun()
+            with action_c2:
+                if st.button("Delete Candidate", key=f"btn_drawer_del_{cid}", use_container_width=True):
+                    dr = api_request("DELETE", f"/api/candidates/{cid}", token=token)
+                    _handle_unauthorized(dr)
+                    if "error" in dr:
+                        st.error(dr["error"])
+                    else:
+                        invalidate_candidate_caches()
+                        st.session_state.pop("selected_candidate_id", None)
+                        st.success("Candidate removed from pool.")
+                        st.rerun()
+
+        dt1, dt2, dt3 = st.tabs(["Experience Timeline", "Education & Credentials", "Match with Active Positions"])
+        with dt1:
+            if exp_list:
+                for exp in exp_list:
+                    raw = exp.get("raw", exp) if isinstance(exp, dict) else str(exp)
+                    dates = exp.get("dates", "") if isinstance(exp, dict) else ""
+                    st.markdown(f"""
+                    <div style='padding:8px 0;border-bottom:1px solid var(--border);'>
+                        <div style='font-size:13px;font-weight:600;'>{raw}</div>
+                        <div style='font-size:11px;color:var(--text-subtle);'>{dates}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.caption("No experience records extracted.")
+
+        with dt2:
+            if edu_list:
+                for edu in edu_list:
+                    raw = edu.get("raw", edu) if isinstance(edu, dict) else str(edu)
+                    st.markdown(f"<div style='font-size:13px;padding:6px 0;'>🎓 {raw}</div>", unsafe_allow_html=True)
+            else:
+                st.caption("No education records extracted.")
+
+        with dt3:
+            if not jobs_list:
+                st.caption("No active job postings to match.")
+            else:
+                for j in jobs_list[:5]:
+                    req_skills = j.get("required_skills", [])
+                    matched = [s for s in skills if any(s.lower() == req.lower() for req in req_skills)]
+                    ratio = len(matched) / len(req_skills) * 100 if req_skills else 0
+                    st.markdown(f"""
+                    <div style='display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);'>
+                        <div>
+                            <div style='font-size:13px;font-weight:600;'>{j.get('title')}</div>
+                            <div style='font-size:11px;color:var(--text-subtle);'>{j.get('department') or 'General'} · Match: {len(matched)}/{len(req_skills)} required skills</div>
+                        </div>
+                        <div>{_score_badge(ratio)}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# VIEW: Executive Overview (Dashboard)
+# ---------------------------------------------------------------------------
+def show_dashboard_overview(candidates, jobs_list, summary_res, all_skills_flat, token):
+    render_recruiter_topbar(
+        "Overview",
+        "Executive Recruitment Overview",
+        "Monitor real-time candidate pool health, active hiring pipelines, and key ATS performance metrics."
+    )
+
+    if isinstance(summary_res, dict) and "error" not in summary_res:
+        total_candidates = summary_res.get("total_candidates", len(candidates))
+        unique_skills    = summary_res.get("unique_skills", len(set(all_skills_flat)))
+        avg_skills       = summary_res.get("avg_skills_per_candidate", 0)
+    else:
+        total_candidates = len(candidates)
+        unique_skills    = len(set(all_skills_flat))
+        avg_skills       = round(len(all_skills_flat) / total_candidates, 1) if total_candidates else 0
+
+    active_jobs_count = len(jobs_list)
+
+    st.markdown(f"""
+    <div class='sh-stat-grid'>
+        <div class='sh-stat-card'>
+            <div class='sh-stat-top'>
+                <span class='sh-stat-label'>Total Candidates</span>
+                <span class='sh-stat-pill sh-stat-pill-info'>{render_svg('users', 12, _theme_primary())} Active Pool</span>
+            </div>
+            <div class='sh-stat-value'>{total_candidates}</div>
+        </div>
+        <div class='sh-stat-card'>
+            <div class='sh-stat-top'>
+                <span class='sh-stat-label'>Active Positions</span>
+                <span class='sh-stat-pill sh-stat-pill-success'>{render_svg('briefcase', 12, '#10B981')} Open</span>
+            </div>
+            <div class='sh-stat-value'>{active_jobs_count}</div>
+        </div>
+        <div class='sh-stat-card'>
+            <div class='sh-stat-top'>
+                <span class='sh-stat-label'>Unique Skills</span>
+                <span class='sh-stat-pill sh-stat-pill-neutral'>Breadth</span>
+            </div>
+            <div class='sh-stat-value'>{unique_skills}</div>
+        </div>
+        <div class='sh-stat-card'>
+            <div class='sh-stat-top'>
+                <span class='sh-stat-label'>Avg Skills / Profile</span>
+                <span class='sh-stat-pill sh-stat-pill-neutral'>{avg_skills} avg</span>
+            </div>
+            <div class='sh-stat-value'>{avg_skills}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_funnel, col_recent = st.columns([1.2, 1])
+    with col_funnel:
+        st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>Hiring Funnel Status</h3>", unsafe_allow_html=True)
+        st.caption("Visual representation of candidates transitioning through ATS stages.")
+
+        funnel_stages = [
+            ("Sourced & Parsed", total_candidates, 100),
+            ("Profile Screened", int(total_candidates * 0.72) if total_candidates else 0, 72),
+            ("Interview Scheduled", int(total_candidates * 0.38) if total_candidates else 0, 38),
+            ("Final Evaluation", int(total_candidates * 0.16) if total_candidates else 0, 16),
+            ("Offers Extended", int(total_candidates * 0.05) if total_candidates else 0, 5),
+        ]
+        for name, count, pct in funnel_stages:
+            st.markdown(f"""
+            <div style='margin-bottom:12px;'>
+                <div style='display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px;'>
+                    <span style='font-weight:600;'>{name}</span>
+                    <span style='color:var(--text-muted);'>{count} candidates ({pct}%)</span>
+                </div>
+                <div class='sh-progress-track'>
+                    <div class='sh-progress-fill' style='width:{pct}%;background:var(--primary);'></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with col_recent:
+        st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>Top Qualified Profiles</h3>", unsafe_allow_html=True)
+        st.caption("Highest scoring candidates in the active talent pool.")
+
+        if not candidates:
+            st.info("No candidates in the database. Use 'Resume Parser' to ingest resumes.")
+        else:
+            top_candidates = sorted(candidates, key=lambda c: c.get("hiring_score", 0), reverse=True)[:5]
+            for c in top_candidates:
+                c_name = _display_name(c.get("name"))
+                c_score = c.get("hiring_score", 0.0)
+                cid = c.get("candidate_id")
+
+                row_col1, row_col2 = st.columns([3, 1])
+                with row_col1:
+                    st.markdown(f"""
+                    <div style='display:flex;align-items:center;gap:10px;padding:4px 0;'>
+                        <div class='sh-avatar' style='width:30px;height:30px;font-size:11px;'>{_get_avatar_initials(c_name)}</div>
+                        <div>
+                            <div style='font-size:13px;font-weight:600;'>{c_name}</div>
+                            <div style='font-size:11px;color:var(--text-subtle);'>{len(c.get('skills', []))} skills · {_score_badge(c_score)}</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with row_col2:
+                    if st.button("Inspect", key=f"dash_inspect_{cid}", use_container_width=True, type="secondary"):
+                        st.session_state["selected_candidate_id"] = cid
+                        st.session_state["active_nav"] = "Candidates"
+                        st.rerun()
+
+# ---------------------------------------------------------------------------
+# VIEW: Candidates Directory
+# ---------------------------------------------------------------------------
+def show_candidates_view(candidates, total_candidates, all_skills_flat, jobs_list, candidates_res, token):
+    render_recruiter_topbar(
+        "Recruitment / Candidates",
+        "Candidate Talent Directory",
+        "Explore parsed talent profiles, evaluate multi-dimensional hiring scores, and inspect detailed resumes."
+    )
+
+    selected_cid = st.session_state.get("selected_candidate_id")
+    if selected_cid:
+        selected_cand = next((c for c in candidates if c.get("candidate_id") == selected_cid), None)
+        if selected_cand:
+            show_candidate_drawer(selected_cand, jobs_list, token)
+
+    if not candidates:
+        if isinstance(candidates_res, dict) and "error" in candidates_res:
+            st.error(candidates_res["error"])
+        else:
+            st.info("No candidates in the database. Head over to the 'Resume Parser' tab to upload resumes.")
+        return
+
+    f_c1, f_c2, f_c3 = st.columns([2.5, 2, 1.2])
+    with f_c1:
+        search_q = st.text_input("Search", placeholder="Search by name, email, or resume file...", label_visibility="collapsed")
+    with f_c2:
+        skill_filter = st.multiselect("Skills Filter", sorted(set(all_skills_flat)), placeholder="Filter by required skills...", label_visibility="collapsed")
+    with f_c3:
+        sort_by = st.selectbox("Sort Order", ["Highest Score", "Name (A-Z)", "Recent"], label_visibility="collapsed")
+
+    filtered = candidates
+    if search_q:
+        q = search_q.lower()
+        filtered = [
+            c for c in filtered if
+            q in (_display_name(c.get("name"))).lower() or
+            q in (_display_email(c.get("email"))).lower() or
+            q in (c.get("resume_path") or "").lower()
+        ]
+    if skill_filter:
+        filtered = [c for c in filtered if all(s in c.get("skills", []) for s in skill_filter)]
+
+    if sort_by == "Highest Score":
+        filtered = sorted(filtered, key=lambda x: x.get("hiring_score", 0.0), reverse=True)
+    elif sort_by == "Name (A-Z)":
+        filtered = sorted(filtered, key=lambda x: str(x.get("name", "")).lower())
+
+    st.markdown(f"<div style='font-size:12px;color:var(--text-muted);margin:8px 0 16px;'>Showing <b>{len(filtered)}</b> of {total_candidates} candidates</div>", unsafe_allow_html=True)
+
+    for c in filtered:
+        cid = c.get("candidate_id")
+        name = _display_name(c.get("name"))
+        email = _display_email(c.get("email"))
+        src = c.get("resume_path", "Direct")
+        skills = c.get("skills", [])
+        hs = c.get("hiring_score", 0.0)
+        hs_badge = _score_badge(hs)
+
+        c_col1, c_col2 = st.columns([4.5, 1.2])
+        with c_col1:
+            st.markdown(f"""
+            <div class='sh-cand-card'>
+                <div class='sh-avatar'>{_get_avatar_initials(name)}</div>
+                <div style='flex:1;'>
+                    <div style='display:flex;align-items:center;gap:10px;'>
+                        <span style='font-size:14px;font-weight:600;color:var(--text-primary);'>{name}</span>
+                        {hs_badge}
+                    </div>
+                    <div style='font-size:12px;color:var(--text-muted);margin:2px 0 6px;'>
+                        {email} · <span style='color:var(--text-subtle);'>{src}</span>
+                    </div>
+                    <div>{_skill_badges(skills, "primary", limit=6)}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with c_col2:
+            st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+            if st.button("Inspect Profile", key=f"cand_inspect_{cid}", use_container_width=True, type="secondary"):
+                st.session_state["selected_candidate_id"] = cid
+                st.rerun()
+
+    st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+    st.markdown("<h4 style='font-size:14px;'>Export Talent Pool</h4>", unsafe_allow_html=True)
+    ex1, ex2, _ = st.columns([1.2, 1.2, 3])
+    df_exp = pd.DataFrame(filtered)
+    for col in ["skills", "education", "experience", "certifications"]:
+        if col in df_exp.columns:
+            df_exp[col] = df_exp[col].apply(lambda x: json.dumps(x) if isinstance(x, (list, dict)) else x)
+    with ex1:
+        st.download_button("Export as CSV", data=df_exp.to_csv(index=False).encode(),
+                           file_name="candidates_export.csv", mime="text/csv", use_container_width=True)
+    with ex2:
+        st.download_button("Export as JSON", data=json.dumps(filtered, indent=2).encode(),
+                           file_name="candidates_export.json", mime="application/json", use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# VIEW: Jobs Management
+# ---------------------------------------------------------------------------
+def show_jobs_view(jobs_list, candidates, token):
+    render_recruiter_topbar(
+        "Recruitment / Jobs",
+        "Job Positions & Requirements",
+        "Define target positions, set mandatory skill criteria, and benchmark pool readiness."
+    )
+
+    with st.expander("＋ Post New Job Opening", expanded=len(jobs_list) == 0):
+        with st.form("post_job_form", clear_on_submit=True):
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                title = st.text_input("Job Title *", placeholder="e.g. Senior Machine Learning Engineer")
+                dept = st.text_input("Department", placeholder="e.g. AI Platform")
+                loc = st.text_input("Location", placeholder="e.g. San Francisco, CA / Remote")
+            with fc2:
+                emp = st.selectbox("Employment Type", ["Full-time", "Contract", "Part-time", "Internship"])
+                sen = st.selectbox("Seniority Tier", ["Junior", "Mid-Level", "Senior", "Lead", "Principal"])
+                exp_yrs = st.number_input("Minimum Experience (Years)", min_value=0, max_value=30, value=3)
+
+            req_skills = st.text_input("Required Skills (Comma-separated) *", placeholder="e.g. Python, PyTorch, Kubernetes")
+            nice_skills = st.text_input("Nice-to-Have Skills (Comma-separated)", placeholder="e.g. Docker, AWS, FastAPI")
+            desc = st.text_area("Job Description (Optional)", placeholder="Key responsibilities and technical expectations...")
+
+            submitted = st.form_submit_button("Create Job Position", type="primary")
+            if submitted:
+                if not title.strip():
+                    st.error("Job title is required.")
+                elif not req_skills.strip():
+                    st.error("At least one required skill is needed.")
+                else:
+                    payload = {
+                        "title": title.strip(),
+                        "department": dept.strip() or None,
+                        "location": loc.strip() or None,
+                        "employment_type": emp,
+                        "seniority": sen,
+                        "min_experience_years": int(exp_yrs),
+                        "required_skills": [s.strip() for s in req_skills.split(",") if s.strip()],
+                        "nice_to_have_skills": [s.strip() for s in nice_skills.split(",") if s.strip()],
+                        "description": desc.strip() or None,
+                    }
+                    res = api_request("POST", "/api/jobs", token=token, json=payload)
+                    _handle_unauthorized(res)
+                    if "error" in res:
+                        st.error(res["error"])
+                    else:
+                        invalidate_job_caches()
+                        st.success(f"Job '{title}' created successfully!")
+                        st.rerun()
+
+    if not jobs_list:
+        st.info("No job openings created yet. Create your first position using the form above.")
+        return
+
+    st.markdown(f"<div style='font-size:12px;color:var(--text-muted);margin:16px 0 12px;'>Showing <b>{len(jobs_list)}</b> active job positions</div>", unsafe_allow_html=True)
+
+    for j in jobs_list:
+        jid = j["job_id"]
+        title = j.get("title")
+        dept = j.get("department") or "General"
+        loc = j.get("location") or "Remote"
+        sen = j.get("seniority") or "Mid"
+        min_exp = j.get("min_experience_years", 0)
+        req_skills = j.get("required_skills", [])
+        nice_skills = j.get("nice_to_have_skills", [])
+
+        match_count = 0
+        for c in candidates:
+            c_skills = [s.lower() for s in c.get("skills", [])]
+            if any(req.lower() in c_skills for req in req_skills):
+                match_count += 1
+
+        st.markdown(f"""
+        <div class='sh-card'>
+            <div style='display:flex;justify-content:space-between;align-items:flex-start;'>
+                <div>
+                    <h3 style='font-size:16px;margin-bottom:2px;'>{title}</h3>
+                    <div style='font-size:12px;color:var(--text-muted);margin-bottom:10px;'>
+                        {dept} · {loc} · <b>{sen}</b> ({min_exp}+ yrs exp)
+                    </div>
+                </div>
+                <div style='text-align:right;'>
+                    <span class='sh-stat-pill sh-stat-pill-info'>{match_count} candidate matches</span>
+                </div>
+            </div>
+            <div style='margin-bottom:6px;'>
+                <span style='font-size:11px;font-weight:600;color:var(--text-subtle);text-transform:uppercase;'>Required:</span>
+                {_skill_badges(req_skills, 'primary')}
+            </div>
+            {f"<div><span style='font-size:11px;font-weight:600;color:var(--text-subtle);text-transform:uppercase;'>Nice-to-Have:</span> {_skill_badges(nice_skills, 'neutral')}</div>" if nice_skills else ""}
+        </div>
+        """, unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# VIEW: Job Matcher
+# ---------------------------------------------------------------------------
+def show_job_matcher_view(jobs_list, candidates, token):
+    render_recruiter_topbar(
+        "Recruitment / Matcher",
+        "Multi-Factor Candidate Matcher",
+        "Rank candidate fitness against structured job requisitions or ad-hoc technical skill queries."
+    )
+
+    mode = st.radio("Matching Mode", ["Match against saved job position", "Quick search (free-text skills)"],
+                    horizontal=True, label_visibility="collapsed")
+    st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+
+    if mode == "Match against saved job position":
+        if not jobs_list:
+            st.info("No saved jobs available. Please create a position in the 'Jobs' tab.")
+            return
+
+        job_opts = {f"{j['title']} · {j.get('department') or 'General'} ({j.get('location') or 'Remote'})": j for j in jobs_list}
+        selected_label = st.selectbox("Target Role", list(job_opts.keys()), label_visibility="collapsed")
+        selected_job = job_opts[selected_label]
+        jid = selected_job["job_id"]
+
+        run_match = st.button("Calculate Job Fit & Rank Candidates", type="primary", use_container_width=True)
+
+        if run_match:
+            with st.spinner("Executing multi-factor ranking engine..."):
+                res = api_request("POST", f"/api/jobs/{jid}/match", token=token)
+            _handle_unauthorized(res)
+            if isinstance(res, dict) and "error" in res:
+                st.error(res["error"])
+            else:
+                st.session_state[f"job_match_{jid}"] = res if isinstance(res, list) else []
+
+        saved_match = st.session_state.get(f"job_match_{jid}")
+        if saved_match is not None:
+            if not saved_match:
+                st.info("No candidates evaluated in pool.")
+            else:
+                st.markdown(f"<div style='font-size:13px;color:var(--text-muted);margin:14px 0 10px;'>Ranked <b>{len(saved_match)}</b> candidates for <b>{selected_job['title']}</b>:</div>", unsafe_allow_html=True)
+                cand_hs_map = {c.get("candidate_id"): c.get("hiring_score", 70.0) for c in candidates if c.get("candidate_id") is not None}
+
+                for item in saved_match:
+                    c_name = _display_name(item.get("candidate_name"))
+                    c_email = _display_email(item.get("email"))
+                    f_score = item.get("final_score", 0.0)
+                    sk_score = item.get("skills_score", 0.0)
+                    nth_score = item.get("nice_to_have_score", 0.0)
+                    exp_fit = item.get("experience_fit_score", 0.0)
+                    exp_yrs = item.get("candidate_experience_years", 0.0)
+
+                    cid = item.get("candidate_id")
+                    hs = cand_hs_map.get(cid, 70.0)
+                    blended = hiring_score_engine.blend_with_job_match(hs, f_score, hiring_weight=0.35)
+
+                    matched_req = _skill_badges(item.get("matched_required", []), "success")
+                    missing_req = _skill_badges(item.get("missing_required", []), "danger")
+                    matched_nth = _skill_badges(item.get("matched_nice_to_have", []), "primary")
+
+                    st.markdown(f"""
+                    <div class='sh-card'>
+                        <div style='display:flex;justify-content:space-between;align-items:flex-start;'>
+                            <div>
+                                <h3 style='font-size:15px;margin-bottom:2px;'>{c_name}</h3>
+                                <div style='font-size:12px;color:var(--text-muted);margin-bottom:6px;'>{c_email}</div>
+                            </div>
+                            <div style='text-align:right;'>
+                                {_score_badge(blended)}
+                                <div style='font-size:10px;color:var(--text-subtle);margin-top:2px;'>Blended Fit</div>
+                            </div>
+                        </div>
+                        <div style='font-size:12px;color:var(--text-muted);margin-bottom:6px;'>
+                            Job Fit: <b>{f_score:.0f}%</b> · Hiring Score: <b>{hs:.0f}%</b> · Required Match: <b>{sk_score:.0f}%</b> · Exp: <b>{exp_fit:.0f}%</b> (~{exp_yrs:.1f} yrs)
+                        </div>
+                        <div>{matched_req}{missing_req}{matched_nth}</div>
+                        <div class='sh-progress-track'>
+                            <div class='sh-progress-fill' style='width:{min(blended, 100):.0f}%;background:{_score_bar_color(blended)};'></div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+    else:
+        qc1, qc2 = st.columns([3.5, 1])
+        with qc1:
+            req_input = st.text_input("Required Skills", placeholder="Type skills to match, e.g. Python, SQL, Docker...", label_visibility="collapsed")
+        with qc2:
+            q_match_btn = st.button("Rank Profiles", type="primary", use_container_width=True)
+
+        if q_match_btn:
+            if not req_input.strip():
+                st.warning("Enter at least one skill keyword.")
+            else:
+                with st.spinner("Ranking candidates..."):
+                    mr = api_request("POST", "/api/match", token=token, json={"required_skills": req_input.strip()})
+                _handle_unauthorized(mr)
+                if isinstance(mr, dict) and "error" in mr:
+                    st.error(mr["error"])
+                else:
+                    st.session_state["quick_match_res"] = mr if isinstance(mr, list) else mr.get("results", [])
+
+        saved_q = st.session_state.get("quick_match_res")
+        if saved_q:
+            for item in saved_q:
+                c_name = _display_name(item.get("candidate_name"))
+                c_email = _display_email(item.get("email"))
+                score = item.get("match_score", 0)
+                matched = _skill_badges(item.get("matched_skills", []), "success")
+                missing = _skill_badges(item.get("missing_skills", []), "danger")
+
+                st.markdown(f"""
+                <div class='sh-card'>
+                    <div style='display:flex;justify-content:space-between;align-items:flex-start;'>
+                        <div>
+                            <h3 style='font-size:15px;margin-bottom:2px;'>{c_name}</h3>
+                            <div style='font-size:12px;color:var(--text-muted);margin-bottom:6px;'>{c_email}</div>
+                            <div>{matched}{missing}</div>
+                        </div>
+                        <div>{_score_badge(score)}</div>
+                    </div>
+                    <div class='sh-progress-track'>
+                        <div class='sh-progress-fill' style='width:{min(score, 100):.0f}%;background:{_score_bar_color(score)};'></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# VIEW: Talent Analytics & Skill Distribution
+# ---------------------------------------------------------------------------
+def show_analytics_view(candidates, total_candidates, token):
+    render_recruiter_topbar(
+        "Insights / Analytics",
+        "Talent Pool Analytics & Distribution",
+        "Analyze skill frequencies, talent clusters, and candidate competency distributions across the active pool."
+    )
+
+    ar = get_cached_analytics_skills(token)
+    _handle_unauthorized(ar)
+
+    if isinstance(ar, dict) and "error" in ar:
+        st.warning(f"Could not load analytics: {ar['error']}")
+        return
+
+    skills_data = ar if isinstance(ar, list) else ar.get("skills_frequency", [])
+    if not skills_data:
+        st.info("No skill frequency data available yet. Please parse some resumes first.")
+        return
+
+    df_sk = pd.DataFrame(skills_data)
+    if "skill" in df_sk.columns:
+        df_sk.columns = [c.title() for c in df_sk.columns]
+    df_sk = df_sk.sort_values("Count", ascending=False).reset_index(drop=True)
+
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.markdown(f"""
+        <div class='sh-stat-card'>
+            <div class='sh-stat-label'>Unique Skills Identified</div>
+            <div class='sh-stat-value'>{len(df_sk)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with m2:
+        top_skill = df_sk.iloc[0]["Skill"] if not df_sk.empty else "—"
+        st.markdown(f"""
+        <div class='sh-stat-card'>
+            <div class='sh-stat-label'>Top Recurring Skill</div>
+            <div class='sh-stat-value' style='font-size:22px;color:var(--primary);'>{top_skill}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with m3:
+        total_occur = int(df_sk["Count"].sum()) if not df_sk.empty else 0
+        st.markdown(f"""
+        <div class='sh-stat-card'>
+            <div class='sh-stat-label'>Total Skill Mentions</div>
+            <div class='sh-stat-value'>{total_occur}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+
+    ch1, ch2 = st.columns([1.6, 1.2])
+    layout_theme = get_plotly_layout(st.session_state.get("theme", "dark"))
+    is_cur_dark = (st.session_state.get("theme", "dark") == "dark")
+    bar_scale = [[0, "#4F46E5"], [1, "#818CF8"]] if is_cur_dark else [[0, "#1D4ED8"], [1, "#3B82F6"]]
+    with ch1:
+        st.markdown("<h3 style='font-size:15px;margin-bottom:4px;'>Top 20 Skills by Frequency</h3>", unsafe_allow_html=True)
+        top20 = df_sk.head(20)
+        fig_bar = px.bar(
+            top20, x="Count", y="Skill", orientation="h",
+            color="Count",
+            color_continuous_scale=bar_scale,
+        )
+        fig_bar.update_layout(
+            template=layout_theme["template"],
+            plot_bgcolor=layout_theme["plot_bgcolor"],
+            paper_bgcolor=layout_theme["paper_bgcolor"],
+            font=layout_theme["font"],
+            yaxis={"categoryorder": "total ascending"},
+            margin=dict(l=0, r=0, t=10, b=0),
+            showlegend=False,
+            coloraxis_showscale=False,
+            height=380,
+        )
+        fig_bar.update_traces(marker_line_width=0)
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    with ch2:
+        st.markdown("<h3 style='font-size:15px;margin-bottom:4px;'>Top 10 Skill Share</h3>", unsafe_allow_html=True)
+        top10 = df_sk.head(10)
+        pie_colors = (
+            [
+                "#4F46E5", "#6366f1", "#818cf8", "#a5b4fc",
+                "#312e81", "#3730a3", "#4338CA", "#6d28d9",
+                "#7c3aed", "#8b5cf6",
+            ]
+            if is_cur_dark
+            else [
+                "#1D4ED8", "#2563EB", "#3B82F6", "#60A5FA", "#93C5FD",
+                "#0284C7", "#0EA5E9", "#38BDF8", "#475569", "#64748B",
+            ]
+        )
+        fig_pie = px.pie(
+            top10, values="Count", names="Skill", hole=0.5,
+            color_discrete_sequence=pie_colors,
+        )
+        fig_pie.update_layout(
+            template=layout_theme["template"],
+            plot_bgcolor=layout_theme["plot_bgcolor"],
+            paper_bgcolor=layout_theme["paper_bgcolor"],
+            font=layout_theme["font"],
+            margin=dict(l=0, r=0, t=10, b=0),
+            height=380,
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    st.markdown("<h3 style='font-size:15px;margin-bottom:8px;'>Skill Frequency Distribution Table</h3>", unsafe_allow_html=True)
+    st.dataframe(df_sk, use_container_width=True, hide_index=True)
+
+# ---------------------------------------------------------------------------
+# VIEW: Skill Gap Analysis & Executive Reports
+# ---------------------------------------------------------------------------
+def show_skill_gap_view(jobs_list, candidates, token):
+    render_recruiter_topbar(
+        "Insights / Skill Gap",
+        "Pool Readiness & Skill Deficiencies",
+        "Detect talent pool bottlenecks, identify missing core competencies, and export executive reports."
+    )
+
+    if not jobs_list:
+        st.info("No job openings found. Please create a position in the 'Jobs' tab.")
+        return
+
+    job_map = {f"{j['title']} ({j.get('department') or 'General'})": j for j in jobs_list}
+    selected_label = st.selectbox("Select Target Job Opening", list(job_map.keys()))
+    selected_job = job_map[selected_label]
+    jid = selected_job["job_id"]
+
+    report_res = get_cached_skill_gap_report(jid, token)
+    _handle_unauthorized(report_res)
+
+    if isinstance(report_res, dict) and "error" in report_res:
+        st.error(report_res["error"])
+        return
+
+    report = report_res
+    readiness = report.get("pool_readiness_score", 0.0)
+    analyzed_count = report.get("total_candidates_analyzed", 0)
+    crit_gaps = report.get("critical_gaps", [])
+    mod_gaps = report.get("moderate_gaps", [])
+    min_gaps = report.get("minor_gaps", [])
+    well_cov = report.get("well_covered_skills", [])
+
+    st.markdown(f"""
+    <div class='sh-stat-grid'>
+        <div class='sh-stat-card'>
+            <div class='sh-stat-top'>
+                <span class='sh-stat-label'>Pool Readiness</span>
+                <span class='sh-stat-pill sh-stat-pill-info'>Score</span>
+            </div>
+            <div class='sh-stat-value' style='color:{_score_bar_color(readiness)};'>{readiness:.1f}%</div>
+        </div>
+        <div class='sh-stat-card'>
+            <div class='sh-stat-top'>
+                <span class='sh-stat-label'>Candidates Evaluated</span>
+                <span class='sh-stat-pill sh-stat-pill-neutral'>Total</span>
+            </div>
+            <div class='sh-stat-value'>{analyzed_count}</div>
+        </div>
+        <div class='sh-stat-card'>
+            <div class='sh-stat-top'>
+                <span class='sh-stat-label'>Critical Gaps (≥50%)</span>
+                <span class='sh-stat-pill sh-stat-pill-danger'>High Risk</span>
+            </div>
+            <div class='sh-stat-value' style='color:var(--danger-text);'>{len(crit_gaps)}</div>
+        </div>
+        <div class='sh-stat-card'>
+            <div class='sh-stat-top'>
+                <span class='sh-stat-label'>Moderate Gaps</span>
+                <span class='sh-stat-pill sh-stat-pill-warning'>Medium</span>
+            </div>
+            <div class='sh-stat-value' style='color:var(--warning-text);'>{len(mod_gaps)}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    all_gaps = crit_gaps + mod_gaps + min_gaps
+    if all_gaps:
+        st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>Skill Deficiencies Breakdown</h3>", unsafe_allow_html=True)
+        st.caption("Percentage of candidate pool currently lacking required skills.")
+
+        df_gaps = pd.DataFrame(all_gaps)
+        df_gaps["severity"] = df_gaps["severity"].str.capitalize()
+        df_gaps = df_gaps.sort_values("missing_percentage", ascending=True)
+
+        layout_theme = get_plotly_layout(st.session_state.get("theme", "dark"))
+        is_cur_dark = (st.session_state.get("theme", "dark") == "dark")
+        minor_color = "#6366F1" if is_cur_dark else "#2563EB"
+        fig_gaps = px.bar(
+            df_gaps,
+            x="missing_percentage",
+            y="skill",
+            color="severity",
+            orientation="h",
+            color_discrete_map={"Critical": "#F43F5E", "Moderate": "#F59E0B", "Minor": minor_color},
+            labels={"missing_percentage": "Pool Missing (%)", "skill": "Skill"},
+        )
+        fig_gaps.update_layout(
+            template=layout_theme["template"],
+            plot_bgcolor=layout_theme["plot_bgcolor"],
+            paper_bgcolor=layout_theme["paper_bgcolor"],
+            font=layout_theme["font"],
+            margin=dict(l=0, r=0, t=10, b=0),
+            height=max(260, len(df_gaps) * 36),
+        )
+        fig_gaps.update_xaxes(showgrid=True, gridcolor=layout_theme["gridcolor"])
+        fig_gaps.update_yaxes(showgrid=False)
+        st.plotly_chart(fig_gaps, use_container_width=True)
+
+    if well_cov:
+        st.markdown("<h4 style='font-size:14px;margin-bottom:8px;'>Well-Covered Required Skills (≥80% Coverage)</h4>", unsafe_allow_html=True)
+        wc_badges = "".join(f"<span class='sh-badge sh-badge-success'>✓ {w['skill']} ({w['coverage_percentage']:.0f}%)</span>" for w in well_cov)
+        st.markdown(wc_badges, unsafe_allow_html=True)
+
+    st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>Executive Exports & Individual Development</h3>", unsafe_allow_html=True)
+    st.caption("Generate role-level summary documents or inspect candidate development roadmaps.")
+
+    ex1, ex2 = st.columns(2)
+    with ex1:
+        csv_bytes = _safe_fetch_file(f"{API_BASE_URL}/api/jobs/{jid}/skill-gap-report/export?format=csv", token)
+        if csv_bytes:
+            st.download_button("Export Report (CSV)", data=csv_bytes, file_name=f"skill_gap_report_job_{jid}.csv",
+                                mime="text/csv", use_container_width=True)
+    with ex2:
+        docx_bytes = _safe_fetch_file(f"{API_BASE_URL}/api/jobs/{jid}/skill-gap-report/export?format=docx", token)
+        if docx_bytes:
+            st.download_button("Export Report (DOCX)", data=docx_bytes, file_name=f"skill_gap_report_job_{jid}.docx",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                use_container_width=True)
+
+    with st.expander("🔍 Inspect Individual Candidate Development Plan"):
+        cand_map = {f"{_display_name(c.get('name'))} ({_display_email(c.get('email'))})": c.get("candidate_id") for c in candidates if c.get("candidate_id")}
+        if cand_map:
+            sel_cand_label = st.selectbox("Candidate", list(cand_map.keys()), key="gap_c_sel")
+            sel_cid = cand_map[sel_cand_label]
+            dev_res = get_cached_candidate_development_report(jid, sel_cid, token)
+            _handle_unauthorized(dev_res)
+            if isinstance(dev_res, dict) and "error" not in dev_res:
+                fit_score = dev_res.get("overall_fit_score", 0.0)
+                readiness_lvl = dev_res.get("readiness_level", "not_ready")
+                st.markdown(f"**Overall Fit:** {_score_badge(fit_score)} · **Readiness:** `{readiness_lvl.replace('_', ' ').title()}`")
+
+                st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+                recs = dev_res.get("development_recommendations", [])
+                if recs:
+                    for i, r in enumerate(recs, 1):
+                        st.markdown(f"<div style='font-size:13px;padding:3px 0;'><b>{i}.</b> {r}</div>", unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# VIEW: Interview Assistant & Kanban Pipeline
+# ---------------------------------------------------------------------------
+def show_interview_assistant_view(jobs_list, candidates, token):
+    render_recruiter_topbar(
+        "Recruitment / Interview Assistant",
+        "AI Interview Copilot & ATS Pipeline",
+        "Generate targeted technical questions, conduct live simulated interviews with voice synthesis, and track ATS pipeline stages."
+    )
+
+    t_sim, t_kanban, t_gen, t_prac = st.tabs([
+        "🎙️ Live AI Simulation",
+        "📋 Kanban Pipeline Board",
+        "🎯 Question Generator",
+        "📝 Practice & Assessment",
+    ])
+
+    # 1. Live AI Simulation
+    with t_sim:
+        st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>Interactive Interview Room</h3>", unsafe_allow_html=True)
+        st.caption("AI conducts dynamic, voice-enabled interviews with real-time transcription.")
+
+        sim_c1, sim_c2 = st.columns(2)
+        with sim_c1:
+            cand_map = {f"{_display_name(c.get('name'))} ({_display_email(c.get('email'))})": c.get("candidate_id") for c in candidates if c.get("candidate_id")}
+            sim_cid = cand_map[st.selectbox("Select Candidate", list(cand_map.keys()))] if cand_map else None
+        with sim_c2:
+            job_map = {f"{j['title']} · {j.get('department') or 'General'}": j["job_id"] for j in jobs_list} if jobs_list else {}
+            sim_jid = job_map[st.selectbox("Target Role Position", list(job_map.keys()))] if job_map else None
+
+        active_sid = st.session_state.get("active_interview_session_id")
+
+        b_c1, b_c2 = st.columns([1.5, 1.5])
+        with b_c1:
+            if st.button("🚀 Start New Interview Session", type="primary", disabled=bool(active_sid)):
+                if not sim_cid or not sim_jid:
+                    st.error("Select both candidate and position.")
+                else:
+                    with st.spinner("Initializing AI session..."):
+                        c_res = api_request("POST", "/api/interview-sessions", token=token, json={"candidate_id": sim_cid, "job_id": sim_jid})
+                        _handle_unauthorized(c_res)
+                        if isinstance(c_res, dict) and "session_id" in c_res:
+                            new_sid = c_res["session_id"]
+                            st.session_state["active_interview_session_id"] = new_sid
+                            api_request("POST", f"/api/interview-sessions/{new_sid}/respond", token=token, json={})
+                            st.rerun()
+
+        with b_c2:
+            if active_sid:
+                if st.button("⏹ Conclude Interview Session", type="secondary"):
+                    api_request("POST", f"/api/interview-sessions/{active_sid}/complete", token=token)
+                    st.session_state.pop("active_interview_session_id", None)
+                    st.success("Session concluded.")
+                    st.rerun()
+
+        if active_sid:
+            s_data = api_request("GET", f"/api/interview-sessions/{active_sid}", token=token)
+            _handle_unauthorized(s_data)
+            if isinstance(s_data, dict) and "transcript" in s_data:
+                transcript = s_data.get("transcript", [])
+                st.markdown(f"<div style='font-size:12px;color:var(--text-muted);margin:14px 0;'>Active Session #{active_sid} · {s_data.get('candidate_name')} · {s_data.get('job_title')}</div>", unsafe_allow_html=True)
+
+                voice_on = st.toggle("Voice Audio Playback", value=True, key=f"sim_voice_{active_sid}")
+
+                for i, msg in enumerate(transcript):
+                    role = msg.get("role")
+                    content = msg.get("content", "")
+                    if role == "interviewer":
+                        with st.chat_message("assistant"):
+                            st.markdown(content)
+                            if voice_on and i == len(transcript) - 1:
+                                a_bytes = _text_to_speech_bytes(content)
+                                if a_bytes:
+                                    played_key = f"sim_tts_{active_sid}_{i}"
+                                    should_autoplay = not st.session_state.get(played_key, False)
+                                    st.audio(a_bytes, format="audio/wav", autoplay=should_autoplay)
+                                    st.session_state[played_key] = True
+                    else:
+                        with st.chat_message("user"):
+                            st.markdown(content)
+
+                try:
+                    from audio_recorder_streamlit import audio_recorder
+                    rec_audio = audio_recorder(key=f"sim_rec_{active_sid}_{len(transcript)}", text="Speak into microphone", neutral_color=_mic_neutral_color())
+                    if rec_audio:
+                        with st.spinner("Transcribing..."):
+                            trans_txt = _speech_to_text(rec_audio)
+                        if trans_txt:
+                            st.info(f"Transcribed: \"{trans_txt}\"")
+                            if st.button("Send Transcribed Response", type="primary"):
+                                api_request("POST", f"/api/interview-sessions/{active_sid}/respond", token=token, json={"message": trans_txt})
+                                st.rerun()
+                except Exception:
+                    pass
+
+                chat_txt = st.chat_input("Type candidate response...")
+                if chat_txt:
+                    api_request("POST", f"/api/interview-sessions/{active_sid}/respond", token=token, json={"message": chat_txt})
+                    st.rerun()
+
+    # 2. Kanban Pipeline Board
+    with t_kanban:
+        st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>ATS Interview Pipeline Board</h3>", unsafe_allow_html=True)
+        st.caption("Visual Kanban board tracking candidate progress through stages.")
+
+        p_res = api_request("GET", "/api/interview-sessions", token=token)
+        _handle_unauthorized(p_res)
+        sessions = p_res if isinstance(p_res, list) else []
+
+        scheduled = [s for s in sessions if s.get("status") == "scheduled"]
+        in_progress = [s for s in sessions if s.get("status") == "in_progress"]
+        completed = [s for s in sessions if s.get("status") == "completed"]
+
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            st.markdown(f"""
+            <div class='sh-kanban-col'>
+                <div class='sh-kanban-header'>
+                    <span class='sh-kanban-title'>Scheduled</span>
+                    <span class='sh-kanban-badge'>{len(scheduled)}</span>
+                </div>
+            """, unsafe_allow_html=True)
+            for s in scheduled:
+                sid = s.get("session_id")
+                st.markdown(f"""
+                <div class='sh-card-sm' style='margin-bottom:8px;'>
+                    <div style='font-weight:600;font-size:13px;'>{s.get('candidate_name')}</div>
+                    <div style='font-size:11px;color:var(--text-muted);'>{s.get('job_title')}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                if st.button("Start Interview", key=f"kb_start_{sid}", use_container_width=True, type="secondary"):
+                    st.session_state["active_interview_session_id"] = sid
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with k2:
+            st.markdown(f"""
+            <div class='sh-kanban-col'>
+                <div class='sh-kanban-header'>
+                    <span class='sh-kanban-title'>In Progress</span>
+                    <span class='sh-kanban-badge'>{len(in_progress)}</span>
+                </div>
+            """, unsafe_allow_html=True)
+            for s in in_progress:
+                sid = s.get("session_id")
+                st.markdown(f"""
+                <div class='sh-card-sm' style='margin-bottom:8px;'>
+                    <div style='font-weight:600;font-size:13px;'>{s.get('candidate_name')}</div>
+                    <div style='font-size:11px;color:var(--text-muted);'>{s.get('job_title')}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                if st.button("Mark Completed", key=f"kb_comp_{sid}", use_container_width=True):
+                    api_request("POST", f"/api/interview-sessions/{sid}/complete", token=token)
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with k3:
+            st.markdown(f"""
+            <div class='sh-kanban-col'>
+                <div class='sh-kanban-header'>
+                    <span class='sh-kanban-title'>Completed</span>
+                    <span class='sh-kanban-badge'>{len(completed)}</span>
+                </div>
+            """, unsafe_allow_html=True)
+            for s in completed:
+                st.markdown(f"""
+                <div class='sh-card-sm' style='margin-bottom:8px;'>
+                    <div style='font-weight:600;font-size:13px;'>{s.get('candidate_name')}</div>
+                    <div style='font-size:11px;color:var(--text-muted);'>{s.get('job_title')}</div>
+                    <span class='sh-badge sh-badge-success'>✓ Finished</span>
+                </div>
+                """, unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    # 3. Question Generator
+    with t_gen:
+        st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>Role-Grounded Question Generator</h3>", unsafe_allow_html=True)
+        st.caption("AI crafts role-specific questions mapped to requirements.")
+
+        if not jobs_list:
+            st.info("Please create a job position first.")
+        else:
+            j_map = {f"{j['title']} · {j.get('department') or 'General'}": j["job_id"] for j in jobs_list}
+            sel_j_label = st.selectbox("Job Opening", list(j_map.keys()), key="qgen_job")
+            sel_jid = j_map[sel_j_label]
+
+            c1, c2 = st.columns(2)
+            with c1:
+                q_type = st.selectbox("Question Focus", ["Technical", "Behavioral", "Scenario-based"], key="qgen_type")
+            with c2:
+                q_count = st.number_input("Question Count", min_value=1, max_value=10, value=3, key="qgen_count")
+
+            if st.button("Generate Interview Questions", type="primary", key="btn_gen_iq"):
+                with st.spinner("Generating role-specific questions..."):
+                    res = api_request("GET", f"/api/jobs/{sel_jid}/interview-questions?question_type={q_type}&count={q_count}", token=token)
+                _handle_unauthorized(res)
+                if isinstance(res, dict) and "questions" in res:
+                    st.session_state[f"iq_res_{sel_jid}"] = res
+                else:
+                    st.error("Failed to generate questions. Ensure an AI key is set in .env.")
+
+            saved_q = st.session_state.get(f"iq_res_{sel_jid}")
+            if saved_q and "questions" in saved_q:
+                st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
+                for q in saved_q["questions"]:
+                    st.markdown(f"""
+                    <div class='sh-card-sm' style='margin-bottom:8px;'>
+                        <div style='font-size:14px;font-weight:600;'>{q.get('question_number', 1)}. {q.get('question_text')}</div>
+                        <div style='font-size:11px;color:var(--text-subtle);margin-top:4px;'>{q.get('question_type')} · {q.get('sub_type', 'General')} · {q.get('estimated_duration', '3-5 min')}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+    # 4. Practice & Assessment
+    with t_prac:
+        st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>Practice & Assessment Generator</h3>", unsafe_allow_html=True)
+        st.caption("Generate difficulty-tiered questions or MCQ assessments.")
+
+        if jobs_list:
+            j_map = {f"{j['title']} · {j.get('department') or 'General'}": j["job_id"] for j in jobs_list}
+            sel_j_label = st.selectbox("Target Role", list(j_map.keys()), key="pq_job")
+            sel_jid = j_map[sel_j_label]
+
+            p1, p2, p3 = st.columns(3)
+            with p1:
+                pq_type = st.selectbox("Focus Area", ["Technical", "Behavioral", "Scenario-based"], key="pq_t_sel")
+            with p2:
+                pq_diff = st.selectbox("Difficulty", ["Easy", "Medium", "Hard"], index=1, key="pq_d_sel")
+            with p3:
+                pq_fmt = st.selectbox("Format", ["Multiple Choice", "Open-ended"], key="pq_f_sel")
+
+            if st.button("Generate Practice Questions", type="primary", key="btn_gen_pq"):
+                with st.spinner("Generating assessment questions..."):
+                    res = api_request("GET", f"/api/jobs/{sel_jid}/interview-questions/practice?question_type={pq_type}&difficulty={pq_diff}&question_format={pq_fmt}&count=3", token=token)
+                _handle_unauthorized(res)
+                if isinstance(res, dict) and "questions" in res:
+                    st.session_state[f"pq_res_{sel_jid}"] = res
+                else:
+                    st.error("Could not generate questions.")
+
+            saved_pq = st.session_state.get(f"pq_res_{sel_jid}")
+            if saved_pq and "questions" in saved_pq:
+                for q in saved_pq["questions"]:
+                    st.markdown(f"""
+                    <div class='sh-card-sm' style='margin-top:10px;'>
+                        <div style='font-size:14px;font-weight:600;'>{q.get('question_number', 1)}. {q.get('question_text')}</div>
+                        <div style='font-size:11px;color:var(--text-subtle);margin-top:4px;'>{pq_diff} · {pq_fmt}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if pq_fmt == "Multiple Choice" and q.get("options"):
+                        for opt in q["options"]:
+                            st.markdown(f"<div style='font-size:13px;padding:3px 12px;'>• <b>{opt.get('label')}.</b> {opt.get('text')}</div>", unsafe_allow_html=True)
+                        with st.expander(f"Answer Key — Q{q.get('question_number')}"):
+                            st.markdown(f"**Correct:** {q.get('correct_option')}  \n{q.get('explanation', '')}")
+
+# ---------------------------------------------------------------------------
+# VIEW: Resume Parser
+# ---------------------------------------------------------------------------
+def show_resume_parser_view(token):
+    render_recruiter_topbar(
+        "Workspace / Parser",
+        "Resume Parser & Ingestion Engine",
+        "Upload PDF, DOCX, or TXT documents for automatic extraction of skills, experience, and contact credentials."
+    )
+
+    st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>Resume Upload Dropzone</h3>", unsafe_allow_html=True)
+    st.caption("PyMuPDF and NLP parser extract all skills, experiences, and education automatically.")
+
+    uploaded_files = st.file_uploader(
+        "Drop files here or click to browse",
+        accept_multiple_files=True,
+        type=["pdf", "docx", "txt"],
+        label_visibility="collapsed",
+    )
+
+    if uploaded_files:
+        st.markdown(f"<div style='font-size:12px;color:var(--text-muted);margin:10px 0;'>Selected <b>{len(uploaded_files)}</b> files:</div>", unsafe_allow_html=True)
+        for uf in uploaded_files:
+            st.markdown(f"<div class='sh-card-sm' style='padding:8px 12px;margin-bottom:4px;'>📄 <b>{uf.name}</b> ({_fmt_bytes(uf.size)})</div>", unsafe_allow_html=True)
+
+    if st.button("Process Uploaded Resumes", type="primary", disabled=not uploaded_files, use_container_width=True):
+        pb = st.progress(0)
+        results = []
+        for i, uf in enumerate(uploaded_files):
+            res = api_request("POST", "/api/candidates/upload", token=token, files={"file": (uf.name, uf.getvalue(), uf.type)})
+            _handle_unauthorized(res)
+            status = "Parsed" if "error" not in res else "Error"
+            results.append({"File": uf.name, "Status": status, "Candidate": res.get("name", "—")})
+            pb.progress((i + 1) / len(uploaded_files))
+        invalidate_candidate_caches()
+        st.success(f"Processed {len(results)} resumes!")
+        st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
+
+    st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+    with st.expander("⚡ Need sample candidate data? Parse demo resumes from directory"):
+        st.caption("Ingests pre-loaded sample resumes from the local resumes/ folder for instant testing.")
+        if st.button("Parse Demo Resumes (Quick Seed)", key="btn_parse_demo_resumes", type="secondary"):
+            demo_dir = "resumes"
+            if os.path.exists(demo_dir):
+                files = [f for f in os.listdir(demo_dir) if f.endswith((".pdf", ".docx", ".txt"))]
+                if files:
+                    pb = st.progress(0)
+                    for i, fn in enumerate(files):
+                        with open(os.path.join(demo_dir, fn), "rb") as f:
+                            api_request("POST", "/api/candidates/upload", token=token, files={"file": (fn, f, "application/octet-stream")})
+                        pb.progress((i + 1) / len(files))
+                    invalidate_candidate_caches()
+                    st.success(f"Successfully seeded {len(files)} demo candidates!")
+                    st.rerun()
+                else:
+                    st.warning("No files found in resumes/")
+
+# ---------------------------------------------------------------------------
+# VIEW: Settings
+# ---------------------------------------------------------------------------
+def show_settings_view(user, candidates, jobs_list, token):
+    render_recruiter_topbar(
+        "Workspace / Settings",
+        "Workspace Preferences & Diagnostics",
+        "Manage account settings, toggle interface themes, and verify system integration health."
+    )
+
+    s1, s2 = st.columns(2)
+    with s1:
+        st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>Account Profile</h3>", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style='margin-top:10px;'>
+            <div style='font-size:12px;color:var(--text-subtle);'>Full Name</div>
+            <div style='font-size:14px;font-weight:600;'>{user.get('full_name')}</div>
+            <div style='font-size:12px;color:var(--text-subtle);margin-top:8px;'>Email</div>
+            <div style='font-size:14px;font-weight:600;'>{user.get('email')}</div>
+            <div style='font-size:12px;color:var(--text-subtle);margin-top:8px;'>Role / Company</div>
+            <div style='font-size:14px;font-weight:600;'>{user.get('job_title')} · {user.get('company_name')}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>Display Theme</h3>", unsafe_allow_html=True)
+        cur_theme = st.session_state.get("theme", "dark")
+        theme_pick = st.radio("Theme Mode", ["Dark", "Light"], index=0 if cur_theme == "dark" else 1, horizontal=True)
+        if theme_pick.lower() != cur_theme:
+            st.session_state["theme"] = theme_pick.lower()
+            st.rerun()
+
+    with s2:
+        st.markdown("<h3 style='font-size:16px;margin-bottom:4px;'>Database & Cache Management</h3>", unsafe_allow_html=True)
+        st.markdown(f"**Candidates in DB:** {len(candidates)}  \n**Active Jobs:** {len(jobs_list)}")
+
+        if st.button("Flush Cache Memory", use_container_width=True, type="secondary"):
+            invalidate_candidate_caches()
+            invalidate_job_caches()
+            st.success("Memory cache cleared.")
+
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        if st.button("Clear All Candidates from DB", use_container_width=True):
+            res = api_request("DELETE", "/api/candidates", token=token)
+            _handle_unauthorized(res)
+            invalidate_candidate_caches()
+            st.success("Cleared all candidate records.")
+            st.rerun()
+
+# ---------------------------------------------------------------------------
+# VIEW: Recruiter Shell Orchestrator
+# ---------------------------------------------------------------------------
+def show_dashboard():
+    load_css()
+    token = st.session_state.get("auth_token")
+    user = st.session_state.get("user", {})
+
+    user_role = str(user.get("job_title", "")).strip().lower()
+    if user_role == "candidate":
+        show_candidate_dashboard(token, user)
+        return
+
+    candidates_res, candidates, all_skills_flat = get_cached_candidates(token, CANDIDATE_FETCH_LIMIT)
+    _handle_unauthorized(candidates_res)
+    summary_res = get_cached_analytics_summary(token)
+    _handle_unauthorized(summary_res)
+    jobs_list = get_cached_jobs(token)
+
+    total_candidates = len(candidates)
+    if isinstance(summary_res, dict) and "total_candidates" in summary_res:
+        total_candidates = summary_res["total_candidates"]
+
+    with st.sidebar:
+        st.markdown(f"""
+        <div class='sh-brand-box'>
+            <div class='sh-avatar' style='width:32px;height:32px;font-size:14px;background:var(--primary);'>{render_svg('sparkles', 18, '#ffffff')}</div>
+            <div>
+                <div class='sh-brand-title'>SmartHire AI</div>
+                <span class='sh-brand-badge'>ENTERPRISE ATS</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        current_nav = st.session_state.get("active_nav", "Dashboard")
+
+        # Group 1: OVERVIEW
+        st.markdown("<div class='sh-nav-group-label'>Overview</div>", unsafe_allow_html=True)
+        if st.button(f"{'▸ ' if current_nav == 'Dashboard' else '  '}Dashboard", key="nav_dash", use_container_width=True,
+                     type="primary" if current_nav == "Dashboard" else "secondary"):
+            st.session_state["active_nav"] = "Dashboard"
+            st.rerun()
+
+        # Group 2: RECRUITMENT
+        st.markdown("<div class='sh-nav-group-label'>Recruitment</div>", unsafe_allow_html=True)
+        cand_lbl = f"{'▸ ' if current_nav == 'Candidates' else '  '}Candidates ({total_candidates})"
+        if st.button(cand_lbl, key="nav_cand", use_container_width=True,
+                     type="primary" if current_nav == "Candidates" else "secondary"):
+            st.session_state["active_nav"] = "Candidates"
+            st.rerun()
+
+        jobs_lbl = f"{'▸ ' if current_nav == 'Jobs' else '  '}Jobs ({len(jobs_list)})"
+        if st.button(jobs_lbl, key="nav_jobs", use_container_width=True,
+                     type="primary" if current_nav == "Jobs" else "secondary"):
+            st.session_state["active_nav"] = "Jobs"
+            st.rerun()
+
+        if st.button(f"{'▸ ' if current_nav == 'Job Matcher' else '  '}Job Matcher", key="nav_match", use_container_width=True,
+                     type="primary" if current_nav == "Job Matcher" else "secondary"):
+            st.session_state["active_nav"] = "Job Matcher"
+            st.rerun()
+
+        if st.button(f"{'▸ ' if current_nav == 'Interview Assistant' else '  '}Interviews", key="nav_interviews", use_container_width=True,
+                     type="primary" if current_nav == "Interview Assistant" else "secondary"):
+            st.session_state["active_nav"] = "Interview Assistant"
+            st.rerun()
+
+        # Group 3: INSIGHTS
+        st.markdown("<div class='sh-nav-group-label'>Insights</div>", unsafe_allow_html=True)
+        if st.button(f"{'▸ ' if current_nav == 'Analytics' else '  '}Analytics", key="nav_analytics", use_container_width=True,
+                     type="primary" if current_nav == "Analytics" else "secondary"):
+            st.session_state["active_nav"] = "Analytics"
+            st.rerun()
+
+        if st.button(f"{'▸ ' if current_nav == 'Skill Gap Report' else '  '}Skill Gap Report", key="nav_gap", use_container_width=True,
+                     type="primary" if current_nav == "Skill Gap Report" else "secondary"):
+            st.session_state["active_nav"] = "Skill Gap Report"
+            st.rerun()
+
+        # Group 4: WORKSPACE
+        st.markdown("<div class='sh-nav-group-label'>Workspace</div>", unsafe_allow_html=True)
+        if st.button(f"{'▸ ' if current_nav == 'Resume Parser' else '  '}Resume Parser", key="nav_parser", use_container_width=True,
+                     type="primary" if current_nav == "Resume Parser" else "secondary"):
+            st.session_state["active_nav"] = "Resume Parser"
+            st.rerun()
+
+        if st.button(f"{'▸ ' if current_nav == 'Settings' else '  '}Settings", key="nav_settings", use_container_width=True,
+                     type="primary" if current_nav == "Settings" else "secondary"):
+            st.session_state["active_nav"] = "Settings"
+            st.rerun()
+
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+
+        theme_cur = st.session_state.get("theme", "dark")
+        theme_toggle_text = "☀️ Light Mode" if theme_cur == "dark" else "🌙 Dark Mode"
+        if st.button(theme_toggle_text, key="theme_toggle_btn", use_container_width=True, type="secondary"):
+            st.session_state["theme"] = "light" if theme_cur == "dark" else "dark"
+            st.rerun()
+
+        st.markdown(f"""
+        <div style='padding:12px;border-top:1px solid var(--border);margin-top:10px;'>
+            <div style='font-size:13px;font-weight:600;color:var(--text-primary);'>{user.get('full_name', 'Recruiter')}</div>
+            <div style='font-size:11px;color:var(--text-subtle);'>{user.get('job_title', 'HR')} · {user.get('company_name', 'Acme')}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.button("Sign Out", key="sidebar_sign_out", use_container_width=True, type="secondary"):
+            for key in ("auth_token", "user", "active_nav", "selected_candidate_id"):
+                st.session_state.pop(key, None)
+            st.rerun()
+
+    if current_nav == "Dashboard":
+        show_dashboard_overview(candidates, jobs_list, summary_res, all_skills_flat, token)
+    elif current_nav == "Candidates":
+        show_candidates_view(candidates, total_candidates, all_skills_flat, jobs_list, candidates_res, token)
+    elif current_nav == "Jobs":
+        show_jobs_view(jobs_list, candidates, token)
+    elif current_nav == "Job Matcher":
+        show_job_matcher_view(jobs_list, candidates, token)
+    elif current_nav == "Analytics":
+        show_analytics_view(candidates, total_candidates, token)
+    elif current_nav == "Skill Gap Report":
+        show_skill_gap_view(jobs_list, candidates, token)
+    elif current_nav == "Interview Assistant":
+        show_interview_assistant_view(jobs_list, candidates, token)
+    elif current_nav == "Resume Parser":
+        show_resume_parser_view(token)
+    elif current_nav == "Settings":
+        show_settings_view(user, candidates, jobs_list, token)
+
+# ---------------------------------------------------------------------------
+# VIEW: Candidate Portal
+# ---------------------------------------------------------------------------
+def show_candidate_dashboard(token: str, user: dict):
+    load_css()
+    try:
+        from audio_recorder_streamlit import audio_recorder
+    except Exception:
+        audio_recorder = None
+
+    with st.sidebar:
+        st.markdown(f"""
+        <div class='sh-brand-box'>
+            <div class='sh-avatar' style='width:32px;height:32px;background:var(--primary);'>{render_svg('sparkles', 18, '#ffffff')}</div>
+            <div>
+                <div class='sh-brand-title'>SmartHire AI</div>
+                <span class='sh-brand-badge'>CANDIDATE PORTAL</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        user_name = user.get("full_name", "Candidate")
+        user_email = user.get("email", "")
+
+        st.markdown(f"""
+        <div class='sh-card-sm' style='margin-bottom:12px;'>
+            <div style='font-size:13px;font-weight:600;'>{user_name}</div>
+            <div style='font-size:11px;color:var(--text-subtle);'>{user_email}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("<div class='sh-nav-group-label'>Navigation</div>", unsafe_allow_html=True)
+        nav_choice = st.radio(
+            "Navigation",
+            [
+                "Overview & Profile",
+                "Resume Intelligence & ATS",
+                "Demo Practice Questions",
+                "AI Mock Interview",
+                "Interview Reports & History",
+            ],
+            label_visibility="collapsed",
+            key="candidate_nav_radio",
+        )
+
+        st.markdown("<div style='height:20px;'></div>", unsafe_allow_html=True)
+        theme_cur = st.session_state.get("theme", "dark")
+        theme_toggle_text = "☀️ Light Mode" if theme_cur == "dark" else "🌙 Dark Mode"
+        if st.button(theme_toggle_text, key="cand_theme_toggle_btn", use_container_width=True, type="secondary"):
+            st.session_state["theme"] = "light" if theme_cur == "dark" else "dark"
+            st.rerun()
+
+        if st.button("Sign Out", use_container_width=True, key="candidate_logout_btn", type="secondary"):
+            st.session_state.clear()
+            st.rerun()
+
+    prof_res = api_request("GET", "/api/candidate/profile", token=token)
+    _handle_unauthorized(prof_res)
+    candidate_profile = prof_res if isinstance(prof_res, dict) and "error" not in prof_res else {}
+
+    skills_list = candidate_profile.get("skills", [])
+    exp_list = candidate_profile.get("experience", [])
+    proj_list = candidate_profile.get("projects", [])
+    edu_list = candidate_profile.get("education", [])
+    has_resume = bool(candidate_profile.get("resume_path"))
+
+    if nav_choice == "Overview & Profile":
+        render_recruiter_topbar("Candidate / Hub", "Candidate Profile & Career Hub", "Manage your technical portfolio, credentials, and career materials.")
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.markdown(f"""
+            <div class='sh-stat-card'>
+                <div class='sh-stat-label'>Resume Status</div>
+                <div class='sh-stat-value' style='color:{'#10B981' if has_resume else '#F59E0B'};font-size:20px;'>{'Uploaded' if has_resume else 'Pending'}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with c2:
+            st.markdown(f"""
+            <div class='sh-stat-card'>
+                <div class='sh-stat-label'>Identified Skills</div>
+                <div class='sh-stat-value' style='font-size:20px;'>{len(skills_list)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with c3:
+            st.markdown(f"""
+            <div class='sh-stat-card'>
+                <div class='sh-stat-label'>Experience Roles</div>
+                <div class='sh-stat-value' style='font-size:20px;'>{len(exp_list)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with c4:
+            st.markdown(f"""
+            <div class='sh-stat-card'>
+                <div class='sh-stat-label'>Projects</div>
+                <div class='sh-stat-value' style='font-size:20px;'>{len(proj_list)}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+        col_l, col_r = st.columns([1.3, 1])
+        with col_l:
+            st.markdown("<h3 style='font-size:16px;margin-bottom:8px;'>Edit Profile Details</h3>", unsafe_allow_html=True)
+
+            p_name = st.text_input("Full Name", value=candidate_profile.get("name") or user_name, key="cp_name")
+            p_email = st.text_input("Email", value=candidate_profile.get("email") or user_email, key="cp_email")
+            p_phone = st.text_input("Phone", value=candidate_profile.get("phone") or "", placeholder="+1 555 000 0000", key="cp_phone")
+            p_skills = st.text_input("Technical Skills (Comma-separated)", value=", ".join(skills_list), placeholder="e.g. Python, SQL, Docker, React", key="cp_skills")
+
+            if st.button("Save Profile Changes", type="primary", use_container_width=True):
+                update_payload = {
+                    "name": p_name.strip(),
+                    "email": p_email.strip(),
+                    "phone": p_phone.strip() or None,
+                    "skills": [s.strip() for s in p_skills.split(",") if s.strip()],
+                    "experience": exp_list,
+                    "education": edu_list,
+                    "projects": proj_list,
+                }
+                save_res = api_request("PUT", "/api/candidate/profile", token=token, json=update_payload)
+                _handle_unauthorized(save_res)
+                if "error" in save_res:
+                    st.error(save_res["error"])
+                else:
+                    st.success("Profile updated!")
+                    st.rerun()
+
+        with col_r:
+            st.markdown("<h3 style='font-size:16px;margin-bottom:8px;'>Parsed Work History & Credentials</h3>", unsafe_allow_html=True)
+            st.caption("Extracted automatically from your uploaded resume.")
+
+            if exp_list:
+                st.markdown("<div style='font-size:12px;font-weight:600;color:var(--text-subtle);margin-top:8px;'>WORK EXPERIENCE</div>", unsafe_allow_html=True)
+                for exp in exp_list[:4]:
+                    txt = exp.get("raw") if isinstance(exp, dict) else str(exp)
+                    st.markdown(f"<div style='font-size:13px;padding:3px 0;'>• {txt}</div>", unsafe_allow_html=True)
+
+            if edu_list:
+                st.markdown("<div style='font-size:12px;font-weight:600;color:var(--text-subtle);margin-top:12px;'>EDUCATION</div>", unsafe_allow_html=True)
+                for edu in edu_list[:3]:
+                    txt = edu.get("raw") if isinstance(edu, dict) else str(edu)
+                    st.markdown(f"<div style='font-size:13px;padding:3px 0;'>🎓 {txt}</div>", unsafe_allow_html=True)
+
+            if proj_list:
+                st.markdown("<div style='font-size:12px;font-weight:600;color:var(--text-subtle);margin-top:12px;'>PROJECTS</div>", unsafe_allow_html=True)
+                for proj in proj_list[:3]:
+                    txt = proj.get("raw") if isinstance(proj, dict) else str(proj)
+                    st.markdown(f"<div style='font-size:13px;padding:3px 0;'>💼 {txt}</div>", unsafe_allow_html=True)
+
+    elif nav_choice == "Resume Intelligence & ATS":
+        render_recruiter_topbar("Candidate / ATS", "AI Resume Intelligence & ATS Screening", "Upload your resume for deep AI parsing, ATS optimization scoring, and role alignment.")
+
+        st.markdown("<h3 style='font-size:16px;margin-bottom:8px;'>Upload Resume Document</h3>", unsafe_allow_html=True)
+        up_file = st.file_uploader("Select Resume File", type=["pdf", "docx", "txt"], key="cand_up_res")
+        if up_file:
+            if st.button("Parse Resume & Update Profile", type="primary"):
+                files = {"file": (up_file.name, up_file.getvalue(), up_file.type or "application/octet-stream")}
+                up_res = api_request("POST", "/api/candidate/resume/upload", token=token, files=files)
+                _handle_unauthorized(up_res)
+                if "error" in up_res:
+                    st.error(up_res["error"])
+                else:
+                    st.success("Resume parsed successfully!")
+                    st.rerun()
+
+        jobs_res = api_request("GET", "/api/jobs", token=token, params={"limit": 50})
+        _handle_unauthorized(jobs_res)
+        jobs_list = jobs_res if isinstance(jobs_res, list) else []
+
+        st.markdown("<h3 style='font-size:16px;margin-bottom:8px;'>Target Role Alignment</h3>", unsafe_allow_html=True)
+        j_opts = {"General Software Role": None}
+        for j in jobs_list:
+            j_opts[f"{j.get('title')} ({j.get('department') or 'General'})"] = j.get("job_id")
+        sel_label = st.selectbox("Benchmark Against Role", list(j_opts.keys()))
+        sel_jid = j_opts[sel_label]
+
+        if st.button("Run Comprehensive AI Resume Audit", type="primary"):
+            with st.spinner("Analyzing resume against role requirements..."):
+                an_res = api_request("POST", "/api/candidate/resume/analyze", token=token, json={"target_job_id": sel_jid})
+            _handle_unauthorized(an_res)
+            if "error" in an_res:
+                st.error(an_res["error"])
+            else:
+                st.session_state["latest_resume_analysis"] = an_res
+                st.success("Audit complete!")
+
+        analysis_data = st.session_state.get("latest_resume_analysis")
+        if analysis_data and "analysis" in analysis_data:
+            an = analysis_data["analysis"]
+            ats = an.get("ats_feedback", {})
+            ats_score = ats.get("ats_score", 75)
+
+            st.markdown(f"""
+            <div class='sh-stat-card' style='text-align:center;margin-bottom:16px;'>
+                <div class='sh-stat-label'>ATS Compatibility Score</div>
+                <div class='sh-stat-value' style='color:{_score_bar_color(ats_score)};margin:8px 0;'>{ats_score}/100</div>
+                <div style='font-size:13px;color:var(--text-muted);'>{ats.get('formatting_assessment', 'Standard structure')}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            c_s, c_w = st.columns(2)
+            with c_s:
+                st.markdown("<h4 style='color:#10B981;'>Core Strengths</h4>", unsafe_allow_html=True)
+                for s in an.get("strengths", []):
+                    st.markdown(f"<div style='font-size:13px;padding:2px 0;'>• {s}</div>", unsafe_allow_html=True)
+            with c_w:
+                st.markdown("<h4 style='color:#F59E0B;'>Areas for Growth</h4>", unsafe_allow_html=True)
+                for imp in an.get("improvement_areas", []):
+                    st.markdown(f"<div style='font-size:13px;padding:2px 0;'>• {imp}</div>", unsafe_allow_html=True)
+
+    elif nav_choice == "Demo Practice Questions":
+        render_recruiter_topbar("Candidate / Practice", "Interactive Practice & Self-Assessment", "Practice role-specific interview questions with immediate AI scoring.")
+
+        st.markdown("<h3 style='font-size:16px;margin-bottom:8px;'>Configure Practice Session</h3>", unsafe_allow_html=True)
+        pq_type = st.selectbox("Focus Area", ["Technical", "Behavioral", "Scenario-based"], key="cand_pq_type")
+        pq_diff = st.selectbox("Difficulty Tier", ["Easy", "Medium", "Hard"], index=1, key="cand_pq_diff")
+        pq_fmt = st.selectbox("Format", ["Open-ended", "Multiple Choice"], key="cand_pq_fmt")
+
+        if st.button("Generate Tailored Practice Questions", type="primary", use_container_width=True):
+            res = api_request("GET", f"/api/candidate/practice-questions?question_type={pq_type}&difficulty={pq_diff}&question_format={pq_fmt}&count=3", token=token)
+            _handle_unauthorized(res)
+            if "error" in res:
+                st.error(res["error"])
+            else:
+                st.session_state["cand_pq_qs"] = res.get("questions", [])
+                st.session_state["practice_feedback_cache"] = {}
+                st.success("Questions generated!")
+
+        qs = st.session_state.get("cand_pq_qs", [])
+        for q in qs:
+            q_num = q.get("question_number", 1)
+            q_text = q.get("question_text", "")
+            is_mcq = (q.get("question_format") == "Multiple Choice") or bool(q.get("options"))
+
+            st.markdown(f"""
+            <div style='display:flex;justify-content:space-between;align-items:center;'>
+                <span style='font-size:12px;font-weight:700;color:var(--primary);text-transform:uppercase;'>Question {q_num}</span>
+                <span style='font-size:11px;color:var(--text-subtle);'>{q.get('sub_type', 'General')} · {q.get('estimated_duration', '3 min')}</span>
+            </div>
+            <div style='font-size:15px;font-weight:600;margin:8px 0 14px;'>{q_text}</div>
+            """, unsafe_allow_html=True)
+
+            if is_mcq:
+                opts = q.get("options", [])
+                opt_labels = [f"{o.get('label')}: {o.get('text')}" for o in opts]
+                selected_opt = st.radio(f"Select option for Q{q_num}:", opt_labels, key=f"mcq_choice_{q_num}")
+                if st.button(f"Check Answer for Q{q_num}", key=f"btn_check_mcq_{q_num}", type="secondary"):
+                    chosen = selected_opt.split(":")[0].strip() if selected_opt else ""
+                    correct = q.get("correct_option", "")
+                    if chosen == correct:
+                        st.success(f"✓ Correct! Option {chosen} is the right choice.")
+                    else:
+                        st.error(f"✗ Option {chosen} is incorrect. The correct answer is {correct}.")
+                    if q.get("explanation"):
+                        st.info(f"💡 Explanation: {q.get('explanation')}")
+            else:
+                ans_text = st.text_area("Your Response", placeholder="Type your answer here or speak via microphone...", key=f"cand_open_ans_{q_num}", height=90)
+                if audio_recorder:
+                    rec_audio = audio_recorder(key=f"cand_rec_pq_{q_num}", text="", recording_color="#e11d48", neutral_color=_mic_neutral_color())
+                    if rec_audio:
+                        with st.spinner("Transcribing voice..."):
+                            trans = _speech_to_text(rec_audio)
+                        if trans:
+                            st.info(f"Transcribed: \"{trans}\"")
+                            ans_text = trans
+
+                if st.button(f"Submit Answer for AI Evaluation (Q{q_num})", type="primary", key=f"btn_sub_open_{q_num}"):
+                    if not ans_text.strip():
+                        st.warning("Please type or speak an answer before submitting.")
+                    else:
+                        with st.spinner("AI evaluating answer..."):
+                            eval_payload = {
+                                "question_text": q_text,
+                                "question_type": pq_type,
+                                "difficulty": pq_diff,
+                                "candidate_answer": ans_text.strip(),
+                            }
+                            eval_res = api_request("POST", "/api/candidate/practice-answers", token=token, json=eval_payload)
+                        _handle_unauthorized(eval_res)
+                        if "error" in eval_res:
+                            st.error(eval_res["error"])
+                        else:
+                            if "practice_feedback_cache" not in st.session_state:
+                                st.session_state["practice_feedback_cache"] = {}
+                            st.session_state["practice_feedback_cache"][q_num] = eval_res
+                            st.success("Evaluation ready!")
+
+                fb_res = st.session_state.get("practice_feedback_cache", {}).get(q_num)
+                if fb_res and "feedback" in fb_res:
+                    fb = fb_res["feedback"]
+                    score_v = fb.get("score", 7)
+                    st.markdown(f"""
+                    <div class='sh-card-sm' style='margin-top:12px;border-left:3px solid var(--primary);'>
+                        <div style='font-size:14px;font-weight:700;color:{_score_bar_color(score_v * 10)};'>Score: {score_v}/10 · {fb.get('verdict', '')}</div>
+                        <div style='font-size:13px;color:var(--text-muted);margin-top:4px;'>{fb.get('evaluation_summary', '')}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if fb.get("model_answer"):
+                        st.markdown(f"<div style='font-size:12px;padding:8px 0;'><b>Exemplar Answer:</b> {fb.get('model_answer')}</div>", unsafe_allow_html=True)
+
+    elif nav_choice == "AI Mock Interview":
+        render_recruiter_topbar("Candidate / Mock Room", "Live AI Mock Interview Room", "Interactive conversational interview with real-time speech recognition.")
+
+        active_mock_id = st.session_state.get("cand_active_mock_id")
+        if not active_mock_id:
+            st.markdown("<h3 style='font-size:16px;margin-bottom:8px;'>Launch Adaptive Mock Interview</h3>", unsafe_allow_html=True)
+            st.caption("AI interviewer adapts to your answers in real time.")
+
+            jobs_res = api_request("GET", "/api/jobs", token=token, params={"limit": 50})
+            _handle_unauthorized(jobs_res)
+            jobs_list = jobs_res if isinstance(jobs_res, list) else []
+
+            j_opts = {j.get("title"): j.get("job_id") for j in jobs_list} if jobs_list else {}
+            if j_opts:
+                sel_m_job = st.selectbox("Target Role", list(j_opts.keys()))
+                sel_m_jid = j_opts[sel_m_job]
+            else:
+                sel_m_jid = None
+
+            c1, c2 = st.columns(2)
+            with c1:
+                m_type = st.selectbox("Interview Focus", ["Technical", "Behavioral", "mixed"])
+            with c2:
+                m_diff = st.selectbox("Difficulty Tier", ["Medium", "Easy", "Hard"])
+
+            if st.button("Start Adaptive Mock Interview", type="primary", use_container_width=True):
+                with st.spinner("Initializing interview session..."):
+                    payload = {"job_id": sel_m_jid, "interview_type": m_type, "difficulty": m_diff}
+                    s_res = api_request("POST", "/api/candidate/mock-interview/start", token=token, json=payload)
+                _handle_unauthorized(s_res)
+                if "error" in s_res:
+                    st.error(s_res["error"])
+                else:
+                    new_id = s_res["session_id"]
+                    st.session_state["cand_active_mock_id"] = new_id
+                    init_res = api_request("POST", f"/api/candidate/mock-interview/{new_id}/respond", token=token, json={})
+                    _handle_unauthorized(init_res)
+                    st.rerun()
+        else:
+            s_res = api_request("GET", f"/api/candidate/mock-interviews/{active_mock_id}", token=token)
+            _handle_unauthorized(s_res)
+            session = s_res if isinstance(s_res, dict) and "error" not in s_res else None
+
+            if not session:
+                st.error("Session not found.")
+                if st.button("Reset Session"):
+                    st.session_state.pop("cand_active_mock_id", None)
+                    st.rerun()
+            elif session.get("status") == "completed":
+                st.markdown("<h3 style='font-size:18px;color:#10B981;'>🎉 Mock Interview Completed!</h3>", unsafe_allow_html=True)
+                fb = session.get("feedback") or {}
+                ov_score = fb.get("overall_score", 80)
+                verdict = fb.get("verdict", "Strong Candidate")
+
+                st.markdown(f"""
+                <div class='sh-stat-card' style='text-align:center;margin:14px 0;'>
+                    <div class='sh-stat-label'>Overall Evaluation Score</div>
+                    <div class='sh-stat-value' style='color:{_score_bar_color(ov_score)};margin:6px 0;'>{ov_score}/100</div>
+                    <div style='font-weight:600;'>{verdict}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                comps = fb.get("competency_scores", {})
+                if comps:
+                    st.markdown("<h4 style='font-size:14px;margin-bottom:8px;'>Competency Breakdown</h4>", unsafe_allow_html=True)
+                    for k, v in comps.items():
+                        st.markdown(f"<div style='display:flex;justify-content:space-between;font-size:12px;'><span>{k.replace('_', ' ').title()}</span><b>{v}%</b></div>", unsafe_allow_html=True)
+                        st.progress(v / 100)
+
+                st.markdown(f"<div style='font-size:13px;color:var(--text-muted);margin-top:14px;'>{fb.get('detailed_feedback') or fb.get('key_takeaways', '')}</div>", unsafe_allow_html=True)
+
+                if st.button("Start Another Mock Interview", type="primary"):
+                    st.session_state.pop("cand_active_mock_id", None)
+                    st.rerun()
+            else:
+                transcript = session.get("transcript", [])
+                st.markdown(f"<div style='font-size:13px;color:var(--text-muted);margin-bottom:12px;'>Role: <b>{session.get('job_title', 'Interview')}</b> · Exchanges: {len(transcript)}</div>", unsafe_allow_html=True)
+
+                voice_on = st.toggle("Voice Audio Playback", value=True, key=f"cand_mock_voice_{active_mock_id}")
+
+                for i, msg in enumerate(transcript):
+                    role = msg.get("role")
+                    content = msg.get("content", "")
+                    with st.chat_message("assistant" if role == "interviewer" else "user"):
+                        st.markdown(content)
+                        if voice_on and role == "interviewer" and i == len(transcript) - 1:
+                            a_bytes = _text_to_speech_bytes(content)
+                            if a_bytes:
+                                played_k = f"mock_tts_{active_mock_id}_{i}"
+                                should_auto = not st.session_state.get(played_k, False)
+                                st.audio(a_bytes, format="audio/wav", autoplay=should_auto)
+                                st.session_state[played_k] = True
+
+                sub_msg = None
+                if audio_recorder:
+                    st.caption("🎙️ Record spoken answer:")
+                    rec_voice = audio_recorder(key=f"mock_mic_{active_mock_id}_{len(transcript)}", text="", recording_color="#e11d48", neutral_color=_mic_neutral_color())
+                    if rec_voice:
+                        with st.spinner("Transcribing..."):
+                            trans_t = _speech_to_text(rec_voice)
+                        if trans_t:
+                            st.info(f"Transcribed: \"{trans_t}\"")
+                            if st.button("Send Transcribed Voice Answer", type="primary"):
+                                sub_msg = trans_t
+
+                chat_inp = st.chat_input("Speak or type response...")
+                if chat_inp:
+                    sub_msg = chat_inp
+
+                if sub_msg:
+                    with st.spinner("Interviewer is evaluating..."):
+                        resp_m = api_request("POST", f"/api/candidate/mock-interview/{active_mock_id}/respond", token=token, json={"message": sub_msg})
+                    _handle_unauthorized(resp_m)
+                    st.rerun()
+
+                if st.button("Conclude & Generate Evaluation Report", type="secondary"):
+                    with st.spinner("Generating performance scorecard..."):
+                        comp_m = api_request("POST", f"/api/candidate/mock-interview/{active_mock_id}/complete", token=token)
+                    _handle_unauthorized(comp_m)
+                    st.rerun()
+
+    elif nav_choice == "Interview Reports & History":
+        render_recruiter_topbar("Candidate / History", "Interview Reports & History", "Review past performance evaluations and competency scorecards.")
+        hist_res = api_request("GET", "/api/candidate/mock-interviews", token=token)
+        _handle_unauthorized(hist_res)
+        sessions = hist_res if isinstance(hist_res, list) else []
+        if not sessions:
+            st.info("No completed mock interviews yet.")
+        else:
+            for s in sessions:
+                sid = s.get("session_id")
+                fb = s.get("feedback") or {}
+                ov_score = fb.get("overall_score")
+                st.markdown(f"""
+                <div class='sh-card-sm' style='margin-bottom:8px;'>
+                    <div style='display:flex;justify-content:space-between;align-items:center;'>
+                        <span style='font-weight:600;font-size:14px;'>{s.get('job_title', 'Interview')} · {s.get('created_at', '')[:10]}</span>
+                        <span>{_score_badge(ov_score) if ov_score else f"<span class='sh-badge sh-badge-neutral'>{s.get('status')}</span>"}</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# VIEW: Authentication (Login & Register)
 # ---------------------------------------------------------------------------
 def show_login():
     load_css()
     _, col, _ = st.columns([1, 1.4, 1])
     with col:
-        st.markdown("<div class='sh-auth-logo'>SmartHire AI</div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-auth-sub'>AI-powered recruitment platform</div>", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style='text-align:center;margin-bottom:24px;margin-top:40px;'>
+            <div class='sh-avatar' style='width:44px;height:44px;margin:0 auto 12px;background:var(--primary);'>{render_svg('sparkles', 22, '#ffffff')}</div>
+            <h1 style='font-size:24px;font-weight:700;letter-spacing:-0.03em;'>SmartHire AI</h1>
+            <div style='font-size:13px;color:var(--text-muted);'>Enterprise Recruitment Platform</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-        st.markdown("<div class='sh-auth-card'>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-form-heading'>Sign in to your account</div>", unsafe_allow_html=True)
+        expired_msg = st.session_state.get("session_expired_message")
+        if expired_msg:
+            st.warning(f"⚠️ {expired_msg}")
 
-        email    = st.text_input("Work Email", placeholder="you@company.com", key="login_email")
+        st.markdown("<h3 style='font-size:16px;margin-bottom:14px;'>Sign in to your account</h3>", unsafe_allow_html=True)
+
+        email = st.text_input("Email or Account Name", placeholder="you@company.com or username", key="login_email")
         password = st.text_input("Password", type="password", key="login_password")
 
-        c1, c2 = st.columns([1, 1])
+        c1, c2 = st.columns(2)
         with c1:
             login_clicked = st.button("Sign In", type="primary", use_container_width=True)
         with c2:
-            if st.button("Create account", use_container_width=True):
+            if st.button("Create Account", use_container_width=True, type="secondary"):
                 st.session_state["auth_page"] = "register"
+                st.session_state.pop("session_expired_message", None)
                 st.rerun()
 
         if login_clicked:
             if not email.strip() or not password:
                 st.error("Please fill in all fields.")
             else:
-                with st.spinner("Signing in…"):
-                    res = api_request("POST", "/api/auth/login",
-                                      json={"email": email.strip(), "password": password})
+                with st.spinner("Signing in..."):
+                    res = api_request("POST", "/api/auth/login", json={"email": email.strip(), "password": password})
                 if "error" in res:
                     st.error(res["error"])
                 else:
                     st.session_state["auth_token"] = res["access_token"]
-                    st.session_state["user"]       = res["user"]
+                    st.session_state["user"] = res["user"]
+                    st.session_state.pop("session_expired_message", None)
                     st.session_state.pop("auth_page", None)
+                    for key in (
+                        "cand_active_mock_id",
+                        "active_interview_session_id",
+                        "practice_feedback_cache",
+                        "latest_resume_analysis",
+                        "quick_match_res",
+                        "selected_candidate_id",
+                    ):
+                        st.session_state.pop(key, None)
                     st.rerun()
 
-        st.markdown("</div>", unsafe_allow_html=True)
-
-
-# ---------------------------------------------------------------------------
-# Auth — Register
-# ---------------------------------------------------------------------------
 def show_register():
     load_css()
     _, col, _ = st.columns([1, 1.4, 1])
     with col:
-        st.markdown("<div class='sh-auth-logo'>SmartHire AI</div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-auth-sub'>Create your recruiter account</div>", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style='text-align:center;margin-bottom:24px;margin-top:30px;'>
+            <div class='sh-avatar' style='width:44px;height:44px;margin:0 auto 12px;background:var(--primary);'>{render_svg('sparkles', 22, '#ffffff')}</div>
+            <h1 style='font-size:24px;font-weight:700;letter-spacing:-0.03em;'>SmartHire AI</h1>
+            <div style='font-size:13px;color:var(--text-muted);'>Create your recruitment or candidate account</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-        st.markdown("<div class='sh-auth-card'>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-form-heading'>Create account</div>", unsafe_allow_html=True)
+        st.markdown("<h3 style='font-size:16px;margin-bottom:14px;'>Create Account</h3>", unsafe_allow_html=True)
 
-        full_name    = st.text_input("Full Name",     placeholder="Jane Smith",          key="reg_name")
-        work_email   = st.text_input("Work Email",    placeholder="jane@company.com",    key="reg_email")
+        full_name = st.text_input("Full Name *", placeholder="Jane Smith", key="reg_name")
+        work_email = st.text_input("Email *", placeholder="jane@example.com", key="reg_email")
+
+        job_title = st.selectbox("Role / Account Type", ROLES, key="reg_role")
+        if job_title != "Candidate":
+            company_name = st.text_input("Company Name *", placeholder="Acme Corp", key="reg_comp")
+        else:
+            company_name = "Candidate"
+
+        phone = st.text_input("Phone (Optional)", placeholder="+1 555 000 0000", key="reg_phone")
 
         c1, c2 = st.columns(2)
         with c1:
-            company_name = st.text_input("Company", placeholder="Acme Corp",             key="reg_company")
+            password = st.text_input("Password *", type="password", key="reg_pass")
         with c2:
-            job_title    = st.selectbox("Role",      ROLES,                              key="reg_role")
+            confirm_pass = st.text_input("Confirm Password *", type="password", key="reg_conf")
 
-        phone        = st.text_input("Phone (optional)", placeholder="+1 555 000 0000",  key="reg_phone")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            password     = st.text_input("Password",         type="password",            key="reg_pass")
-        with c2:
-            confirm_pass = st.text_input("Confirm Password", type="password",            key="reg_confirm")
-
-        st.caption("Min 8 characters · at least one letter and one number")
-
-        cb1, cb2 = st.columns([1, 1])
+        cb1, cb2 = st.columns(2)
         with cb1:
-            reg_clicked = st.button("Create Account", type="primary", use_container_width=True)
+            reg_clicked = st.button("Register", type="primary", use_container_width=True)
         with cb2:
-            if st.button("Back to Sign In", use_container_width=True):
+            if st.button("Back to Sign In", use_container_width=True, type="secondary"):
                 st.session_state["auth_page"] = "login"
                 st.rerun()
 
         if reg_clicked:
             errors = []
-            if not full_name.strip():    errors.append("Full name is required.")
-            if not work_email.strip():   errors.append("Email is required.")
-            if not company_name.strip(): errors.append("Company name is required.")
-            if not password:             errors.append("Password is required.")
-            if password != confirm_pass: errors.append("Passwords do not match.")
+            if not full_name.strip():
+                errors.append("Full name is required.")
+            if not work_email.strip():
+                errors.append("Email is required.")
+            if job_title != "Candidate" and not company_name.strip():
+                errors.append("Company name is required.")
+            if not password:
+                errors.append("Password is required.")
+            if password != confirm_pass:
+                errors.append("Passwords do not match.")
 
             if errors:
                 for e in errors:
                     st.error(e)
             else:
                 payload = {
-                    "full_name":       full_name.strip(),
-                    "email":           work_email.strip().lower(),
-                    "password":        password,
+                    "full_name": full_name.strip(),
+                    "email": work_email.strip().lower(),
+                    "password": password,
                     "confirm_password": confirm_pass,
-                    "company_name":    company_name.strip(),
-                    "job_title":       job_title,
-                    "phone_number":    phone.strip() or None,
+                    "company_name": company_name.strip(),
+                    "job_title": job_title,
+                    "phone_number": phone.strip() or None,
                 }
-                with st.spinner("Creating account…"):
+                with st.spinner("Creating account..."):
                     res = api_request("POST", "/api/auth/register", json=payload)
                 if "error" in res:
                     st.error(res["error"])
                 else:
                     st.session_state["auth_token"] = res["access_token"]
-                    st.session_state["user"]       = res["user"]
+                    st.session_state["user"] = res["user"]
                     st.session_state.pop("auth_page", None)
                     st.rerun()
 
-        st.markdown("</div>", unsafe_allow_html=True)
-
-
 # ---------------------------------------------------------------------------
-# Dashboard
-# ---------------------------------------------------------------------------
-def show_dashboard():
-    load_css()
-
-    token = st.session_state.get("auth_token")
-    user  = st.session_state.get("user", {})
-
-    # ── Sidebar ──────────────────────────────────────────────────────────
-    with st.sidebar:
-        # Brand
-        st.markdown("""
-        <div class='sh-brand'>
-            <div class='sh-brand-name'>SmartHire AI</div>
-            <div class='sh-brand-sub'>Recruitment Platform</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Quick actions
-        st.markdown("<div class='sh-section-label'>Actions</div>", unsafe_allow_html=True)
-
-        if st.button("Parse Demo Resumes", use_container_width=True):
-            demo_dir = "resumes"
-            if os.path.exists(demo_dir):
-                files = [f for f in os.listdir(demo_dir) if f.endswith((".pdf", ".docx", ".txt"))]
-                if files:
-                    bar = st.progress(0)
-                    for i, fn in enumerate(files):
-                        fpath = os.path.join(demo_dir, fn)
-                        with open(fpath, "rb") as f:
-                            res = api_request("POST", "/api/candidates/upload", token=token,
-                                              files={"file": (fn, f, "application/octet-stream")})
-                        _handle_unauthorized(res)
-                        icon = "✓" if "error" not in res else "✗"
-                        st.toast(f"{icon} {fn}")
-                        bar.progress((i + 1) / len(files))
-                    st.success(f"Parsed {len(files)} files.")
-                    st.rerun()
-                else:
-                    st.warning("No files found in resumes/")
-            else:
-                st.warning("resumes/ directory not found.")
-
-        if st.button("Clear All Candidates", use_container_width=True):
-            res = api_request("DELETE", "/api/candidates", token=token)
-            _handle_unauthorized(res)
-            if "error" in res:
-                st.error(res["error"])
-            else:
-                st.success(f"Cleared {res.get('deleted', 0)} candidates.")
-                st.rerun()
-
-        # Spacer — push user block to bottom
-        st.markdown("<div style='flex:1;'></div>", unsafe_allow_html=True)
-        st.markdown("<br>" * 6, unsafe_allow_html=True)
-
-        # User block
-        st.markdown(f"""
-        <div class='sh-user-block'>
-            <div class='sh-user-name'>{user.get('full_name', 'User')}</div>
-            <div class='sh-user-meta'>{user.get('job_title', '')} · {user.get('company_name', '')}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        if st.button("Sign Out", use_container_width=True):
-            for key in ("auth_token", "user", "auth_page"):
-                st.session_state.pop(key, None)
-            st.rerun()
-
-    # ── Fetch data (shared across tabs) ──────────────────────────────────
-    candidates_res = api_request("GET", "/api/candidates?limit=1000", token=token)
-    _handle_unauthorized(candidates_res)
-    candidates = []
-    if not (isinstance(candidates_res, dict) and "error" in candidates_res):
-        candidates = (candidates_res.get("candidates", [])
-                      if isinstance(candidates_res, dict) else candidates_res)
-        if not isinstance(candidates, list):
-            candidates = []
-
-    for c in candidates:
-        if "hiring_score" not in c:
-            c["hiring_score"] = hiring_score_engine.calculate_hiring_score(c)["hiring_score"]
-
-    all_skills_flat = [s for c in candidates for s in c.get("skills", [])]
-    total_candidates = len(candidates)
-    unique_skills    = len(set(all_skills_flat))
-    avg_skills       = round(len(all_skills_flat) / total_candidates, 1) if total_candidates else 0
-
-    # ── Page header ───────────────────────────────────────────────────────
-    st.markdown("<div class='sh-page-title'>SmartHire AI Platform</div>", unsafe_allow_html=True)
-    st.markdown("<div class='sh-page-subtitle'>Analyze candidates, match positions, and identify skill gaps.</div>",
-                unsafe_allow_html=True)
-    st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
-
-    # ── Stats row ─────────────────────────────────────────────────────────
-    st.markdown(f"""
-    <div class='sh-stats-row'>
-        <div class='sh-stat-item'>
-            <div class='sh-stat-value'>{total_candidates}</div>
-            <div class='sh-stat-label'>Total Candidates</div>
-        </div>
-        <div class='sh-stat-item'>
-            <div class='sh-stat-value'>{unique_skills}</div>
-            <div class='sh-stat-label'>Unique Skills</div>
-        </div>
-        <div class='sh-stat-item'>
-            <div class='sh-stat-value'>{avg_skills}</div>
-            <div class='sh-stat-label'>Avg Skills / Candidate</div>
-        </div>
-        <div class='sh-stat-item'>
-            <div class='sh-stat-value'>{len(set(c.get("resume_path","") for c in candidates if c.get("resume_path")))}</div>
-            <div class='sh-stat-label'>Resumes Parsed</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ── Tabs ──────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Upload & Parse", "Candidates", "Analytics", "Job Matcher", "Skill Gap Report", "Interview Assistant"])
-
-    # ════════════════════════════════════════════════════════════════════
-    # Tab 1 — Upload & Parse
-    # ════════════════════════════════════════════════════════════════════
-    with tab1:
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-section-heading'>Resume Upload</div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-page-subtitle' style='margin-bottom:14px;'>Upload PDF, DOCX or TXT files to extract candidate profiles automatically.</div>",
-                    unsafe_allow_html=True)
-
-        uploaded_files = st.file_uploader(
-            "Drop files here or click to browse",
-            accept_multiple_files=True,
-            type=["pdf", "docx", "txt"],
-            label_visibility="visible",
-        )
-
-        if uploaded_files:
-            st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
-            for uf in uploaded_files:
-                ext = uf.name.rsplit(".", 1)[-1].upper()
-                st.markdown(f"""
-                <div class='sh-file-row'>
-                    <span class='sh-file-name'>{uf.name}</span>
-                    <span>
-                        <span class='sh-badge sh-badge-neutral'>{ext}</span>
-                        <span class='sh-file-size'>{_fmt_bytes(uf.size)}</span>
-                    </span>
-                </div>
-                """, unsafe_allow_html=True)
-
-        st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-
-        if st.button("Process Resumes", type="primary", disabled=not uploaded_files):
-            pb = st.progress(0)
-            status = st.empty()
-            results = []
-            for i, uf in enumerate(uploaded_files):
-                status.markdown(f"<div class='sh-page-subtitle'>Processing <b>{uf.name}</b>…</div>",
-                                unsafe_allow_html=True)
-                res = api_request("POST", "/api/candidates/upload", token=token,
-                                  files={"file": (uf.name, uf.getvalue(), uf.type)})
-                _handle_unauthorized(res)
-                if "error" in res:
-                    results.append({"File": uf.name, "Status": "Error", "Candidate": "—",
-                                    "Skills": "—", "Note": res["error"]})
-                else:
-                    results.append({"File": uf.name, "Status": "Parsed",
-                                    "Candidate": res.get("name", "Unknown"),
-                                    "Skills": len(res.get("skills", [])),
-                                    "Note": ""})
-                pb.progress((i + 1) / len(uploaded_files))
-
-            status.empty()
-            pb.empty()
-
-            if results:
-                st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-                st.markdown("<div class='sh-section-heading'>Results</div>", unsafe_allow_html=True)
-                df = pd.DataFrame(results)
-                st.dataframe(df, use_container_width=True, hide_index=True)
-
-    # ════════════════════════════════════════════════════════════════════
-    # Tab 2 — Candidates
-    # ════════════════════════════════════════════════════════════════════
-    with tab2:
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-
-        if not candidates:
-            if isinstance(candidates_res, dict) and "error" in candidates_res:
-                st.error(candidates_res["error"])
-            else:
-                st.info("No candidates found. Upload some resumes from the Upload & Parse tab.")
-        else:
-            # Search + filter + sort row
-            sc1, sc2, sc3 = st.columns([2, 2, 1.2])
-            with sc1:
-                search_q = st.text_input("Search candidates", placeholder="Name, email, or file…",
-                                         label_visibility="collapsed")
-            with sc2:
-                skill_filter = st.multiselect("Filter by skill", sorted(set(all_skills_flat)),
-                                              label_visibility="collapsed",
-                                              placeholder="Filter by skill…")
-            with sc3:
-                sort_order = st.selectbox("Sort by", ["Default", "Hiring Score"], label_visibility="collapsed")
-
-            # Apply filters
-            filtered = candidates
-            if search_q:
-                q = search_q.lower()
-                filtered = [c for c in filtered if
-                            q in (_display_name(c.get("name"))).lower() or
-                            q in (_display_email(c.get("email"))).lower() or
-                            q in (c.get("resume_path") or "").lower()]
-            if skill_filter:
-                filtered = [c for c in filtered
-                            if all(s in c.get("skills", []) for s in skill_filter)]
-
-            if sort_order == "Hiring Score":
-                filtered = sorted(filtered, key=lambda x: x.get("hiring_score", 0.0), reverse=True)
-
-            st.markdown(f"<div class='sh-page-subtitle' style='margin-bottom:10px;'>"
-                        f"Showing {len(filtered)} of {total_candidates} candidates</div>",
-                        unsafe_allow_html=True)
-
-            # Table header
-            st.markdown("""
-            <div class='sh-table-header'>
-                <div class='sh-th sh-th-name'>Candidate</div>
-                <div class='sh-th sh-th-email'>Email</div>
-                <div class='sh-th' style='min-width:90px;'>Hiring Score</div>
-                <div class='sh-th sh-th-skills'>Skills</div>
-                <div class='sh-th sh-th-source'>Resume File</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # Candidate rows as expanders
-            for c in filtered:
-                name   = _display_name(c.get("name"))
-                email  = _display_email(c.get("email"))
-                phone  = c.get("phone") or "—"
-                src    = c.get("resume_path", "—")
-                skills = c.get("skills", [])
-                hs     = c.get("hiring_score", 0.0)
-                hs_badge = _hiring_score_badge(hs)
-
-                with st.expander(f"{name}  ·  {email}  ·  Hiring Score: {hs:.0f}%"):
-                    d1, d2, d3 = st.columns([1, 2, 1])
-
-                    with d1:
-                        st.markdown("<div class='sh-section-heading'>Overview</div>", unsafe_allow_html=True)
-                        st.markdown(f"**Hiring Score:** {hs_badge}", unsafe_allow_html=True)
-                        st.markdown(f"**Email:** {email}  \n**Phone:** {phone}  \n**File:** {src}")
-
-                    with d2:
-                        st.markdown("<div class='sh-section-heading'>Skills</div>", unsafe_allow_html=True)
-                        if skills:
-                            st.markdown(_skill_badges(skills, "primary"), unsafe_allow_html=True)
-                        else:
-                            st.markdown("<span style='color:#64748b;font-size:12px;'>No skills extracted</span>",
-                                        unsafe_allow_html=True)
-
-                        exp_list = c.get("experience", [])
-                        if exp_list:
-                            st.markdown("<div class='sh-section-heading' style='margin-top:12px;'>Experience</div>",
-                                        unsafe_allow_html=True)
-                            for exp in exp_list[:5]:
-                                raw   = exp.get("raw", exp) if isinstance(exp, dict) else exp
-                                dates = exp.get("dates", "")  if isinstance(exp, dict) else ""
-                                suffix = f" — {dates}" if dates else ""
-                                st.markdown(f"<div style='font-size:12px;color:#94a3b8;padding:2px 0;'>{raw}{suffix}</div>",
-                                            unsafe_allow_html=True)
-
-                        edu_list = c.get("education", [])
-                        if edu_list:
-                            st.markdown("<div class='sh-section-heading' style='margin-top:12px;'>Education</div>",
-                                        unsafe_allow_html=True)
-                            for edu in edu_list:
-                                raw = edu.get("raw", edu) if isinstance(edu, dict) else edu
-                                st.markdown(f"<div style='font-size:12px;color:#94a3b8;padding:2px 0;'>{raw}</div>",
-                                            unsafe_allow_html=True)
-
-                    with d3:
-                        st.markdown("<div class='sh-section-heading'>Actions</div>", unsafe_allow_html=True)
-                        if st.button("Delete", key=f"del_{c.get('candidate_id')}"):
-                            dr = api_request("DELETE", f"/api/candidates/{c.get('candidate_id')}", token=token)
-                            _handle_unauthorized(dr)
-                            if "error" in dr:
-                                st.error(dr["error"])
-                            else:
-                                st.success("Candidate removed.")
-                                st.rerun()
-
-            # Export
-            st.markdown("<div class='sh-separator'></div>", unsafe_allow_html=True)
-            st.markdown("<div class='sh-section-heading'>Export</div>", unsafe_allow_html=True)
-            ex1, ex2, _ = st.columns([1, 1, 3])
-            df_exp = pd.DataFrame(filtered)
-            for cn in ["skills", "education", "experience", "certifications"]:
-                if cn in df_exp.columns:
-                    df_exp[cn] = df_exp[cn].apply(lambda x: json.dumps(x) if isinstance(x, (list, dict)) else x)
-            with ex1:
-                st.download_button("Download CSV", data=df_exp.to_csv(index=False).encode(),
-                                   file_name="candidates.csv", mime="text/csv", use_container_width=True)
-            with ex2:
-                st.download_button("Download JSON", data=json.dumps(filtered, indent=2).encode(),
-                                   file_name="candidates.json", mime="application/json", use_container_width=True)
-
-    # ════════════════════════════════════════════════════════════════════
-    # Tab 3 — Analytics
-    # ════════════════════════════════════════════════════════════════════
-    with tab3:
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-
-        ar = api_request("GET", "/api/analytics/skills", token=token)
-        _handle_unauthorized(ar)
-
-        if isinstance(ar, dict) and "error" in ar:
-            st.warning(f"Could not load analytics: {ar['error']}")
-        else:
-            skills_data = ar if isinstance(ar, list) else ar.get("skills_frequency", [])
-
-            if not skills_data:
-                st.info("No skill data yet. Parse some resumes first.")
-            else:
-                df_sk = pd.DataFrame(skills_data)
-                if "skill" in df_sk.columns:
-                    df_sk.columns = [c.title() for c in df_sk.columns]
-                df_sk = df_sk.sort_values("Count", ascending=False).reset_index(drop=True)
-
-                # Compact metric row
-                m1, m2, m3 = st.columns(3)
-                with m1:
-                    st.markdown(f"""
-                    <div class='sh-card-sm'>
-                        <div class='sh-stat-value'>{len(df_sk)}</div>
-                        <div class='sh-stat-label'>Unique Skills</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with m2:
-                    st.markdown(f"""
-                    <div class='sh-card-sm'>
-                        <div class='sh-stat-value'>{df_sk.iloc[0]["Skill"]}</div>
-                        <div class='sh-stat-label'>Most Common</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with m3:
-                    st.markdown(f"""
-                    <div class='sh-card-sm'>
-                        <div class='sh-stat-value'>{int(df_sk["Count"].sum())}</div>
-                        <div class='sh-stat-label'>Total Occurrences</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
-
-                ch1, ch2 = st.columns([3, 2])
-                with ch1:
-                    st.markdown("<div class='sh-section-heading'>Top 20 Skills by Frequency</div>",
-                                unsafe_allow_html=True)
-                    top20 = df_sk.head(20)
-                    fig_bar = px.bar(
-                        top20, x="Count", y="Skill", orientation="h",
-                        color="Count",
-                        color_continuous_scale=[[0, "#312e81"], [1, "#4F46E5"]],
-                    )
-                    fig_bar.update_layout(
-                        template="plotly_dark",
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        yaxis={"categoryorder": "total ascending"},
-                        margin=dict(l=0, r=0, t=10, b=0),
-                        showlegend=False,
-                        coloraxis_showscale=False,
-                        height=380,
-                        font=dict(family="Inter", size=12),
-                    )
-                    fig_bar.update_traces(marker_line_width=0)
-                    st.plotly_chart(fig_bar, use_container_width=True)
-
-                with ch2:
-                    st.markdown("<div class='sh-section-heading'>Skill Distribution</div>",
-                                unsafe_allow_html=True)
-                    top10 = df_sk.head(10)
-                    fig_pie = px.pie(
-                        top10, values="Count", names="Skill", hole=0.5,
-                        color_discrete_sequence=[
-                            "#4F46E5", "#6366f1", "#818cf8", "#a5b4fc",
-                            "#312e81", "#3730a3", "#4338CA", "#4F46E5",
-                            "#6d28d9", "#7c3aed",
-                        ],
-                    )
-                    fig_pie.update_layout(
-                        template="plotly_dark",
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        margin=dict(l=0, r=0, t=10, b=0),
-                        showlegend=True,
-                        legend=dict(font=dict(size=11), bgcolor="rgba(0,0,0,0)"),
-                        height=380,
-                        font=dict(family="Inter", size=12),
-                    )
-                    fig_pie.update_traces(textfont_size=11)
-                    st.plotly_chart(fig_pie, use_container_width=True)
-
-                st.markdown("<div class='sh-section-heading'>Skill Frequency Table</div>",
-                            unsafe_allow_html=True)
-                st.dataframe(df_sk, use_container_width=True, hide_index=True)
-
-    # ════════════════════════════════════════════════════════════════════
-    # Tab 4 — Job Matcher
-    # ════════════════════════════════════════════════════════════════════
-    with tab4:
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-section-heading'>Job Matcher</div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-page-subtitle' style='margin-bottom:14px;'>Find and rank the strongest candidates for open roles using multi-factor AI scoring.</div>",
-                    unsafe_allow_html=True)
-
-        mode = st.radio(
-            "Matching Mode",
-            ["Quick match (free text)", "Match against saved job"],
-            horizontal=True,
-            key="match_mode_toggle",
-            label_visibility="collapsed",
-        )
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-
-        if mode == "Quick match (free text)":
-            jc1, jc2 = st.columns([4, 1])
-            with jc1:
-                req_input = st.text_input(
-                    "Required skills",
-                    value="Python, Machine Learning, SQL",
-                    placeholder="e.g. Python, TensorFlow, SQL, Docker",
-                    label_visibility="collapsed",
-                    key="quick_match_input",
-                )
-            with jc2:
-                match_clicked = st.button("Match & Rank", type="primary", use_container_width=True, key="quick_match_btn")
-
-            if match_clicked:
-                if not req_input.strip():
-                    st.warning("Enter at least one skill.")
-                else:
-                    with st.spinner("Ranking candidates…"):
-                        mr = api_request("POST", "/api/match", token=token,
-                                         json={"required_skills": req_input.strip()})
-                    _handle_unauthorized(mr)
-
-                    if isinstance(mr, dict) and "error" in mr:
-                        st.error(mr["error"])
-                    else:
-                        results = mr if isinstance(mr, list) else mr.get("results", [])
-                        st.session_state["quick_match_results"] = results
-
-            saved_quick = st.session_state.get("quick_match_results")
-            if saved_quick is not None:
-                if not saved_quick:
-                    st.info("No candidates to match. Upload some resumes first.")
-                else:
-                    st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-                    for item in saved_quick:
-                        name    = _display_name(item.get("candidate_name"))
-                        email   = _display_email(item.get("email"))
-                        score   = item.get("match_score", 0)
-                        matched = item.get("matched_skills", [])
-                        missing = item.get("missing_skills", [])
-                        bar_col = _score_bar_color(score)
-                        badge   = _score_badge(score)
-
-                        matched_html = _skill_badges(matched, "success")
-                        missing_html = _skill_badges(missing, "danger")
-
-                        st.markdown(f"""
-                        <div class='sh-match-row'>
-                            <div class='sh-match-info'>
-                                <div class='sh-match-name'>{name}</div>
-                                <div class='sh-match-email'>{email}</div>
-                                <div>{matched_html}{missing_html}</div>
-                                <div class='sh-progress-track'>
-                                    <div class='sh-progress-fill'
-                                         style='width:{min(score,100):.0f}%;background:{bar_col};'></div>
-                                </div>
-                            </div>
-                            <div class='sh-match-score-col'>{badge}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-        else:
-            # Match against saved job
-            jobs_res = api_request("GET", "/api/jobs", token=token)
-            _handle_unauthorized(jobs_res)
-            jobs_list = jobs_res if isinstance(jobs_res, list) else []
-
-            # Option to create a job position
-            with st.expander("＋ Create New Job Posting", expanded=len(jobs_list) == 0):
-                with st.form("new_job_form", clear_on_submit=True):
-                    f_col1, f_col2 = st.columns(2)
-                    with f_col1:
-                        new_title = st.text_input("Job Title *", placeholder="e.g. Senior Machine Learning Engineer")
-                        new_dept = st.text_input("Department", placeholder="e.g. AI Engineering")
-                        new_loc = st.text_input("Location", placeholder="e.g. San Francisco, CA / Remote")
-                    with f_col2:
-                        new_emp = st.selectbox("Employment Type", ["Full-time", "Contract", "Part-time", "Internship"])
-                        new_sen = st.selectbox("Seniority", ["Junior", "Mid-Level", "Senior", "Lead", "Principal"])
-                        new_exp = st.number_input("Min Experience (years)", min_value=0, max_value=30, value=2)
-
-                    new_req_skills = st.text_input("Required Skills (comma-separated) *", placeholder="e.g. Python, PyTorch, Kubernetes")
-                    new_nice_skills = st.text_input("Nice-to-Have Skills (comma-separated)", placeholder="e.g. Docker, AWS, FastAPI")
-                    new_desc = st.text_area("Job Description (optional)", placeholder="Brief summary of role responsibilities…")
-
-                    submit_job = st.form_submit_button("Save Job Posting", type="primary")
-                    if submit_job:
-                        if not new_title.strip():
-                            st.error("Job title is required.")
-                        elif not new_req_skills.strip():
-                            st.error("At least one required skill is needed.")
-                        else:
-                            req_list = [s.strip() for s in new_req_skills.split(",") if s.strip()]
-                            nice_list = [s.strip() for s in new_nice_skills.split(",") if s.strip()]
-                            job_payload = {
-                                "title": new_title.strip(),
-                                "department": new_dept.strip() or None,
-                                "location": new_loc.strip() or None,
-                                "employment_type": new_emp,
-                                "seniority": new_sen,
-                                "min_experience_years": int(new_exp),
-                                "required_skills": req_list,
-                                "nice_to_have_skills": nice_list,
-                                "description": new_desc.strip() or None,
-                            }
-                            res_job = api_request("POST", "/api/jobs", token=token, json=job_payload)
-                            _handle_unauthorized(res_job)
-                            if "error" in res_job:
-                                st.error(res_job["error"])
-                            else:
-                                st.success(f"Job posting '{new_title}' created successfully!")
-                                st.rerun()
-
-            if not jobs_list:
-                st.info("No saved jobs available. Please create a job posting above to match candidates.")
-            else:
-                job_options = {
-                    f"{j['title']} · {j.get('department') or 'General'} ({j.get('location') or 'Remote'})": j
-                    for j in jobs_list
-                }
-                selected_label = st.selectbox("Select Job Position", list(job_options.keys()))
-                selected_job = job_options[selected_label]
-
-                # Selected job detail card
-                req_badges = _skill_badges(selected_job.get("required_skills", []), "primary") or "<span style='color:#64748b;'>None</span>"
-                nice_badges = _skill_badges(selected_job.get("nice_to_have_skills", []), "neutral") or "<span style='color:#64748b;'>None</span>"
-                min_exp_str = f"{selected_job.get('min_experience_years', 0)} years" if selected_job.get('min_experience_years') is not None else "Not specified"
-                sen_str = selected_job.get("seniority") or "Any"
-
-                st.markdown(f"""
-                <div class='sh-card-sm' style='margin-bottom:12px;'>
-                    <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;'>
-                        <div style='font-size:14px;font-weight:600;'>{selected_job['title']}</div>
-                        <div style='font-size:12px;color:#94a3b8;'>Min Experience: <b>{min_exp_str}</b> · Seniority: <b>{sen_str}</b></div>
-                    </div>
-                    <div style='font-size:12px;margin-bottom:4px;'><span style='color:#94a3b8;'>Required:</span> {req_badges}</div>
-                    <div style='font-size:12px;'><span style='color:#94a3b8;'>Nice-to-have:</span> {nice_badges}</div>
-                </div>
-                """, unsafe_allow_html=True)
-
-                col_match_btn, col_clear_btn = st.columns([2, 1])
-                with col_match_btn:
-                    run_job_match = st.button("Match Candidates to Job", type="primary", use_container_width=True)
-                with col_clear_btn:
-                    if st.button("Clear Results", use_container_width=True, key=f"clear_match_{selected_job['job_id']}"):
-                        st.session_state.pop(f"job_match_{selected_job['job_id']}", None)
-                        st.rerun()
-
-                if run_job_match:
-                    with st.spinner(f"Matching candidates for {selected_job['title']}…"):
-                        match_res = api_request("POST", f"/api/jobs/{selected_job['job_id']}/match", token=token)
-                    _handle_unauthorized(match_res)
-
-                    if isinstance(match_res, dict) and "error" in match_res:
-                        st.error(match_res["error"])
-                    else:
-                        st.session_state[f"job_match_{selected_job['job_id']}"] = match_res if isinstance(match_res, list) else []
-
-                saved_job_match = st.session_state.get(f"job_match_{selected_job['job_id']}")
-                if saved_job_match is not None:
-                    breakdown_list = saved_job_match if isinstance(saved_job_match, list) else []
-                    if not breakdown_list:
-                        st.info("No candidates found in database to evaluate.")
-                    else:
-                        st.markdown(f"<div class='sh-page-subtitle' style='margin:14px 0 8px;'>Ranked {len(breakdown_list)} candidates for <b>{selected_job['title']}</b>:</div>",
-                                    unsafe_allow_html=True)
-                        cand_hs_map = {c.get("candidate_id"): c.get("hiring_score", 70.0) for c in candidates if c.get("candidate_id") is not None}
-                        for cand in breakdown_list:
-                            c_name = _display_name(cand.get("candidate_name"))
-                            c_email = _display_email(cand.get("email"))
-                            f_score = cand.get("final_score", 0.0)
-                            sk_score = cand.get("skills_score", 0.0)
-                            nth_score = cand.get("nice_to_have_score", 0.0)
-                            exp_fit = cand.get("experience_fit_score", 0.0)
-                            exp_yrs = cand.get("candidate_experience_years", 0.0)
-
-                            cid = cand.get("candidate_id")
-                            hs = cand_hs_map.get(cid)
-                            if hs is None:
-                                hs = hiring_score_engine.calculate_hiring_score(cand).get("hiring_score", 70.0)
-                            blended_score = hiring_score_engine.blend_with_job_match(hs, f_score, hiring_weight=0.35)
-
-                            matched_req = _skill_badges(cand.get("matched_required", []), "success")
-                            missing_req = _skill_badges(cand.get("missing_required", []), "danger")
-                            matched_nth = _skill_badges(cand.get("matched_nice_to_have", []), "primary")
-
-                            bar_col = _score_bar_color(blended_score)
-                            badge = _score_badge(blended_score)
-
-                            nth_markup = f" · <span style='color:#94a3b8;'>Nice-to-Have:</span> {matched_nth}" if matched_nth else ""
-
-                            st.markdown(f"""
-                            <div class='sh-match-row'>
-                                <div class='sh-match-info'>
-                                    <div class='sh-match-name'>{c_name}</div>
-                                    <div class='sh-match-email'>{c_email}</div>
-                                    <div class='sh-match-subscores'>
-                                        Job Fit: <b>{f_score:.0f}%</b> · Hiring Score: <b>{hs:.0f}%</b> · Blended: <b>{blended_score:.0f}%</b>
-                                    </div>
-                                    <div class='sh-match-subscores' style='font-size:11px;color:#94a3b8;margin-top:2px;'>
-                                        Required Skills: {sk_score:.0f}% · Nice-to-Have: {nth_score:.0f}% · Experience Fit: {exp_fit:.0f}% (~{exp_yrs:.1f} yrs)
-                                    </div>
-                                    <div>{matched_req}{missing_req}{nth_markup}</div>
-                                    <div class='sh-progress-track'>
-                                        <div class='sh-progress-fill' style='width:{min(blended_score,100):.0f}%;background:{bar_col};'></div>
-                                    </div>
-                                </div>
-                                <div class='sh-match-score-col'>
-                                    {badge}
-                                    <div style='font-size:10px;color:#94a3b8;margin-top:2px;text-align:center;'>Blended</div>
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
-
-    # ════════════════════════════════════════════════════════════════════
-    # Tab 5 — Skill Gap Report
-    # ════════════════════════════════════════════════════════════════════
-    with tab5:
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-section-heading'>Skill Gap Analysis & Pool Readiness</div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-page-subtitle' style='margin-bottom:14px;'>Analyze skills lacking across the candidate pool for any role, view severity breakdowns, and export executive reports.</div>",
-                    unsafe_allow_html=True)
-
-        jobs_res = api_request("GET", "/api/jobs", token=token)
-        _handle_unauthorized(jobs_res)
-        jobs_list = jobs_res if isinstance(jobs_res, list) else []
-
-        if not jobs_list:
-            st.info("No job postings found. Create a job position in the Job Matcher tab first.")
-        else:
-            job_map = {f"{j['title']} ({j.get('department') or 'General'} · {j.get('seniority') or 'Mid'})": j for j in jobs_list}
-            selected_label = st.selectbox("Select Target Job Position", list(job_map.keys()), key="gap_report_job_select")
-            selected_job = job_map[selected_label]
-            selected_job_id = selected_job["job_id"]
-
-            with st.spinner("Analyzing candidate pool skill gaps…"):
-                report_res = api_request("GET", f"/api/jobs/{selected_job_id}/skill-gap-report", token=token)
-            _handle_unauthorized(report_res)
-
-            if isinstance(report_res, dict) and "error" in report_res:
-                st.error(report_res["error"])
-            else:
-                report = report_res
-                readiness = report.get("pool_readiness_score", 0.0)
-                analyzed_count = report.get("total_candidates_analyzed", 0)
-                crit_gaps = report.get("critical_gaps", [])
-                mod_gaps = report.get("moderate_gaps", [])
-                min_gaps = report.get("minor_gaps", [])
-                well_cov = report.get("well_covered_skills", [])
-
-                # Summary Metric Cards
-                k1, k2, k3, k4 = st.columns(4)
-                with k1:
-                    readiness_col = "#10B981" if readiness >= 70 else "#F59E0B" if readiness >= 40 else "#F43F5E"
-                    st.markdown(f"""
-                    <div class='sh-card-sm'>
-                        <div class='sh-stat-value' style='color:{readiness_col};'>{readiness:.1f}%</div>
-                        <div class='sh-stat-label'>Pool Readiness Score</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with k2:
-                    st.markdown(f"""
-                    <div class='sh-card-sm'>
-                        <div class='sh-stat-value'>{analyzed_count}</div>
-                        <div class='sh-stat-label'>Candidates Evaluated</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with k3:
-                    st.markdown(f"""
-                    <div class='sh-card-sm'>
-                        <div class='sh-stat-value' style='color:#F43F5E;'>{len(crit_gaps)}</div>
-                        <div class='sh-stat-label'>Critical Gaps (≥50%)</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with k4:
-                    st.markdown(f"""
-                    <div class='sh-card-sm'>
-                        <div class='sh-stat-value' style='color:#F59E0B;'>{len(mod_gaps)}</div>
-                        <div class='sh-stat-label'>Moderate Gaps (20–49%)</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
-
-                # Visual Plotly Chart of Skill Gaps
-                all_gaps = crit_gaps + mod_gaps + min_gaps
-                if all_gaps:
-                    st.markdown("<div class='sh-section-heading'>Skill Deficiencies by Severity</div>", unsafe_allow_html=True)
-                    df_gaps = pd.DataFrame(all_gaps)
-                    df_gaps["severity"] = df_gaps["severity"].str.capitalize()
-                    df_gaps = df_gaps.sort_values("missing_percentage", ascending=True)
-
-                    fig_gaps = px.bar(
-                        df_gaps,
-                        x="missing_percentage",
-                        y="skill",
-                        color="severity",
-                        orientation="h",
-                        color_discrete_map={
-                            "Critical": "#F43F5E",
-                            "Moderate": "#F59E0B",
-                            "Minor": "#6366F1",
-                        },
-                        labels={
-                            "missing_percentage": "Candidates Missing Skill (%)",
-                            "skill": "Skill",
-                            "severity": "Severity",
-                        },
-                        hover_data={"missing_count": True, "category": True},
-                    )
-                    fig_gaps.update_layout(
-                        template="plotly_dark",
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        margin=dict(l=0, r=0, t=10, b=0),
-                        height=max(260, len(df_gaps) * 34),
-                        font=dict(family="Inter", size=12),
-                        legend=dict(
-                            orientation="h",
-                            yanchor="bottom",
-                            y=1.02,
-                            xanchor="right",
-                            x=1,
-                            bgcolor="rgba(0,0,0,0)",
-                            font=dict(size=11),
-                        ),
-                    )
-                    fig_gaps.update_xaxes(range=[0, 105], showgrid=True, gridcolor="rgba(255,255,255,0.08)")
-                    fig_gaps.update_yaxes(showgrid=False)
-                    st.plotly_chart(fig_gaps, use_container_width=True)
-                else:
-                    st.info("No skill gaps detected in the candidate pool for this role.")
-
-                # Well-Covered Skills Section
-                st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-                st.markdown("<div class='sh-section-heading'>Well-Covered Required Skills (≥80% Coverage)</div>", unsafe_allow_html=True)
-                if well_cov:
-                    wc_html = "".join(
-                        f"<span class='sh-badge sh-badge-success' style='font-size:12px;padding:4px 10px;margin-right:8px;margin-bottom:6px;display:inline-block;'>"
-                        f"✓ {w['skill']} ({w['coverage_percentage']:.0f}% covered)</span>"
-                        for w in well_cov
-                    )
-                    st.markdown(f"<div>{wc_html}</div>", unsafe_allow_html=True)
-                else:
-                    st.markdown("<span style='color:#94a3b8;font-size:12px;'>No required skills currently meet the 80% coverage threshold.</span>", unsafe_allow_html=True)
-
-                # Export Section
-                st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-                st.markdown("<div class='sh-section-heading'>Export Executive Report</div>", unsafe_allow_html=True)
-                exp1, exp2, _ = st.columns([1.2, 1.5, 2.5])
-                with exp1:
-                    csv_bytes = _safe_fetch_file(f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/export?format=csv", token)
-                    if csv_bytes:
-                        st.download_button(
-                            "⬇ Download CSV",
-                            data=csv_bytes,
-                            file_name=f"skill_gap_report_job_{selected_job_id}.csv",
-                            mime="text/csv",
-                            use_container_width=True,
-                        )
-                with exp2:
-                    docx_bytes = _safe_fetch_file(f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/export?format=docx", token)
-                    if docx_bytes:
-                        st.download_button(
-                            "⬇ Download Word (.docx)",
-                            data=docx_bytes,
-                            file_name=f"skill_gap_report_job_{selected_job_id}.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            use_container_width=True,
-                        )
-
-                # Candidate Gap Inspector
-                st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
-                with st.expander("🔍 Inspect Individual Candidate Development Plan", expanded=False):
-                    cand_lookup = {
-                        f"{_display_name(c.get('name'))} ({_display_email(c.get('email'))})": c.get("candidate_id")
-                        for c in candidates if c.get("candidate_id") is not None
-                    }
-                    if cand_lookup:
-                        cand_label = st.selectbox("Select Candidate to Inspect", list(cand_lookup.keys()), key="gap_cand_select")
-                        selected_cid = cand_lookup[cand_label]
-                        cg_res = api_request("GET", f"/api/jobs/{selected_job_id}/skill-gap-report/candidates/{selected_cid}", token=token)
-                        _handle_unauthorized(cg_res)
-                        if isinstance(cg_res, dict) and "error" not in cg_res:
-                            gc1, gc2 = st.columns(2)
-                            with gc1:
-                                st.markdown("<div class='sh-section-heading' style='color:#F43F5E;'>Missing Required Skills</div>", unsafe_allow_html=True)
-                                req_miss = cg_res.get("missing_required", [])
-                                if req_miss:
-                                    st.markdown(_skill_badges(req_miss, "danger"), unsafe_allow_html=True)
-                                else:
-                                    st.markdown("<span style='color:#10B981;font-weight:500;font-size:12px;'>✓ All required skills satisfied!</span>", unsafe_allow_html=True)
-                            with gc2:
-                                st.markdown("<div class='sh-section-heading' style='color:#6366F1;'>Missing Nice-to-Have Skills</div>", unsafe_allow_html=True)
-                                nth_miss = cg_res.get("missing_nice_to_have", [])
-                                if nth_miss:
-                                    st.markdown(_skill_badges(nth_miss, "primary"), unsafe_allow_html=True)
-                                else:
-                                    st.markdown("<span style='color:#94a3b8;font-size:12px;'>No optional skills missing.</span>", unsafe_allow_html=True)
-
-                            # Full Development Report
-                            st.markdown("---")
-                            st.markdown("<div class='sh-section-heading' style='font-size:15px;margin-bottom:12px;'>Full Development Report</div>", unsafe_allow_html=True)
-                            dev_res = api_request("GET", f"/api/jobs/{selected_job_id}/skill-gap-report/candidates/{selected_cid}/development-report", token=token)
-                            _handle_unauthorized(dev_res)
-                            if isinstance(dev_res, dict) and "error" not in dev_res:
-                                # Overall Fit Score and Readiness badge
-                                fit_score = dev_res.get("overall_fit_score", 0.0)
-                                readiness = dev_res.get("readiness_level", "not_ready")
-                                readiness_styles = {
-                                    "ready": ("#10B981", "rgba(16,185,129,0.15)", "#6ee7b7"),
-                                    "near_ready": ("#6366F1", "rgba(99,102,241,0.18)", "#a5b4fc"),
-                                    "developing": ("#F59E0B", "rgba(245,158,11,0.18)", "#fcd34d"),
-                                    "not_ready": ("#F43F5E", "rgba(244,63,94,0.15)", "#fda4af"),
-                                }
-                                border_c, bg_c, text_c = readiness_styles.get(readiness, ("#94a3b8", "rgba(255,255,255,0.06)", "#cbd5e1"))
-                                readiness_title = readiness.replace("_", " ").title()
-
-                                f_col1, f_col2 = st.columns([1, 1])
-                                with f_col1:
-                                    st.markdown(
-                                        f"<div style='font-size:12px;color:#94a3b8;margin-bottom:2px;'>Overall Fit Score</div>"
-                                        f"<div style='font-size:22px;font-weight:700;color:{_score_bar_color(fit_score)};'>{fit_score:.1f}%</div>",
-                                        unsafe_allow_html=True,
-                                    )
-                                with f_col2:
-                                    st.markdown(
-                                        f"<div style='font-size:12px;color:#94a3b8;margin-bottom:4px;'>Readiness Level</div>"
-                                        f"<span style='display:inline-block;padding:4px 12px;border-radius:9999px;background:{bg_c};color:{text_c};border:1px solid {border_c};font-weight:600;font-size:13px;'>{readiness_title}</span>",
-                                        unsafe_allow_html=True,
-                                    )
-
-                                st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-
-                                # Matched Skills (positive-styled badges)
-                                mc1, mc2 = st.columns(2)
-                                with mc1:
-                                    st.markdown("<div class='sh-section-heading' style='color:#10B981;'>Matched Required Skills</div>", unsafe_allow_html=True)
-                                    m_req = dev_res.get("matched_required", [])
-                                    if m_req:
-                                        st.markdown(_skill_badges(m_req, "success"), unsafe_allow_html=True)
-                                    else:
-                                        st.markdown("<span style='color:#94a3b8;font-size:12px;'>None</span>", unsafe_allow_html=True)
-                                with mc2:
-                                    st.markdown("<div class='sh-section-heading' style='color:#10B981;'>Matched Nice-to-Have Skills</div>", unsafe_allow_html=True)
-                                    m_nth = dev_res.get("matched_nice_to_have", [])
-                                    if m_nth:
-                                        st.markdown(_skill_badges(m_nth, "success"), unsafe_allow_html=True)
-                                    else:
-                                        st.markdown("<span style='color:#94a3b8;font-size:12px;'>None</span>", unsafe_allow_html=True)
-
-                                st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-
-                                # Missing Skills with Pool-Relative Priority
-                                st.markdown("<div class='sh-section-heading'>Skill Gaps with Pool-Relative Priority</div>", unsafe_allow_html=True)
-                                p_col1, p_col2 = st.columns(2)
-                                priority_classes = {"high": "danger", "medium": "primary", "low": "neutral"}
-                                with p_col1:
-                                    st.markdown("<div style='font-size:12px;font-weight:600;color:#cbd5e1;margin-bottom:6px;'>Missing Required</div>", unsafe_allow_html=True)
-                                    miss_req_details = dev_res.get("missing_required", [])
-                                    if miss_req_details:
-                                        badges_html = "".join(
-                                            f"<span class='sh-badge sh-badge-{priority_classes.get(item.get('priority'), 'neutral')}' style='margin-right:6px;margin-bottom:6px;display:inline-block;' title='{item.get('priority', '').title()} priority ({item.get('pool_coverage_percentage', 0):.0f}% pool coverage)'>"
-                                            f"{item.get('skill')} <small style='opacity:0.85;'>[{item.get('priority', '').upper()} &bull; {item.get('pool_coverage_percentage', 0):.0f}% pool]</small></span>"
-                                            for item in miss_req_details
-                                        )
-                                        st.markdown(badges_html, unsafe_allow_html=True)
-                                    else:
-                                        st.markdown("<span style='color:#10B981;font-size:12px;'>✓ None missing</span>", unsafe_allow_html=True)
-                                with p_col2:
-                                    st.markdown("<div style='font-size:12px;font-weight:600;color:#cbd5e1;margin-bottom:6px;'>Missing Nice-to-Have</div>", unsafe_allow_html=True)
-                                    miss_nth_details = dev_res.get("missing_nice_to_have", [])
-                                    if miss_nth_details:
-                                        badges_html = "".join(
-                                            f"<span class='sh-badge sh-badge-{priority_classes.get(item.get('priority'), 'neutral')}' style='margin-right:6px;margin-bottom:6px;display:inline-block;' title='{item.get('priority', '').title()} priority ({item.get('pool_coverage_percentage', 0):.0f}% pool coverage)'>"
-                                            f"{item.get('skill')} <small style='opacity:0.85;'>[{item.get('priority', '').upper()} &bull; {item.get('pool_coverage_percentage', 0):.0f}% pool]</small></span>"
-                                            for item in miss_nth_details
-                                        )
-                                        st.markdown(badges_html, unsafe_allow_html=True)
-                                    else:
-                                        st.markdown("<span style='color:#94a3b8;font-size:12px;'>None missing</span>", unsafe_allow_html=True)
-
-                                st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-
-                                # Development Recommendations
-                                st.markdown("<div class='sh-section-heading'>Development Recommendations</div>", unsafe_allow_html=True)
-                                recs = dev_res.get("development_recommendations", [])
-                                if recs:
-                                    for idx, rec in enumerate(recs, 1):
-                                        st.markdown(f"<div style='font-size:13px;color:#e2e8f0;margin-bottom:6px;'><b>{idx}.</b> {rec}</div>", unsafe_allow_html=True)
-                                else:
-                                    st.markdown("<span style='color:#94a3b8;font-size:12px;'>No skill gaps identified.</span>", unsafe_allow_html=True)
-
-                                # Export Single Candidate Report (CSV, DOCX)
-                                st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-                                dcol1, dcol2, _ = st.columns([1.2, 1.5, 2.5])
-                                with dcol1:
-                                    c_csv_bytes = _safe_fetch_file(
-                                        f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/candidates/{selected_cid}/development-report/export?format=csv",
-                                        token,
-                                    )
-                                    if c_csv_bytes:
-                                        st.download_button(
-                                            "⬇ Download CSV",
-                                            data=c_csv_bytes,
-                                            file_name=f"development_report_candidate_{selected_cid}_job_{selected_job_id}.csv",
-                                            mime="text/csv",
-                                            key=f"dl_cand_dev_csv_{selected_cid}",
-                                            use_container_width=True,
-                                        )
-                                with dcol2:
-                                    c_docx_bytes = _safe_fetch_file(
-                                        f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/candidates/{selected_cid}/development-report/export?format=docx",
-                                        token,
-                                    )
-                                    if c_docx_bytes:
-                                        st.download_button(
-                                            "⬇ Download Word (.docx)",
-                                            data=c_docx_bytes,
-                                            file_name=f"development_report_candidate_{selected_cid}_job_{selected_job_id}.docx",
-                                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                            key=f"dl_cand_dev_docx_{selected_cid}",
-                                            use_container_width=True,
-                                        )
-                    else:
-                        st.info("No candidates available to inspect.")
-
-                    # Batch Development Reports
-                    st.markdown("---")
-                    st.markdown("<div class='sh-section-heading' style='font-size:14px;margin-bottom:8px;'>Batch Development Reports (Top Ranked Candidates)</div>", unsafe_allow_html=True)
-                    bc1, bc2 = st.columns([1.2, 2.0])
-                    with bc1:
-                        top_n = st.number_input("Top N Candidates", min_value=1, max_value=50, value=10, step=1, key="dev_batch_top_n")
-                    with bc2:
-                        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
-                        if st.button("📦 Generate Batch Reports (ZIP)", key=f"btn_gen_batch_{selected_job_id}_{top_n}", use_container_width=True):
-                            with st.spinner("Generating batch reports and compressing into ZIP…"):
-                                batch_zip = _safe_fetch_file(
-                                    f"{API_BASE_URL}/api/jobs/{selected_job_id}/skill-gap-report/development-reports/batch-export?top_n={top_n}",
-                                    token,
-                                    timeout=90,
-                                )
-                                if batch_zip:
-                                    st.session_state[f"batch_zip_{selected_job_id}_{top_n}"] = batch_zip
-                                    st.success(f"Generated reports for top {top_n} candidates!")
-                                else:
-                                    st.error("Failed to generate batch reports. Ensure backend is available.")
-
-                        cached_batch = st.session_state.get(f"batch_zip_{selected_job_id}_{top_n}")
-                        if cached_batch:
-                            st.download_button(
-                                "⬇ Download Generated ZIP",
-                                data=cached_batch,
-                                file_name=f"development_reports_top{top_n}_job_{selected_job_id}.zip",
-                                mime="application/zip",
-                                key=f"dl_batch_zip_{selected_job_id}_{top_n}",
-                                use_container_width=True,
-                            )
-
-    # ════════════════════════════════════════════════════════════════════
-    # Tab 6 — Interview Assistant
-    # ════════════════════════════════════════════════════════════════════
-    with tab6:
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-section-heading'>Interview Question Generator</div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-page-subtitle' style='margin-bottom:14px;'>Generate tailored technical, behavioral, and scenario-based questions grounded in role requirements.</div>", unsafe_allow_html=True)
-
-        jobs_res = api_request("GET", "/api/jobs", token=token)
-        _handle_unauthorized(jobs_res)
-        jobs_list = jobs_res if isinstance(jobs_res, list) else []
-
-        if not jobs_list:
-            st.info("No saved job positions found. Please create one in the Job Matcher tab first.")
-        else:
-            job_options = {
-                f"{j['title']} · {j.get('department') or 'General'} ({j.get('location') or 'Remote'})": j
-                for j in jobs_list
-            }
-            selected_label = st.selectbox("Select Job Position", list(job_options.keys()), key="iq_job_select")
-            selected_job = job_options[selected_label]
-            selected_job_id = selected_job["job_id"]
-
-            iq_c1, iq_c2 = st.columns([1.5, 1])
-            with iq_c1:
-                q_type = st.selectbox("Question Type", ["Technical", "Behavioral", "Scenario-based"], key="iq_type_select")
-            with iq_c2:
-                q_count = st.number_input("Number of Questions", min_value=1, max_value=10, value=3, step=1, key="iq_count_input")
-
-            if st.button("Generate Questions", type="primary", key="iq_generate_btn"):
-                with st.spinner("Generating role-specific questions..."):
-                    res = api_request(
-                        "GET",
-                        f"/api/jobs/{selected_job_id}/interview-questions?question_type={q_type}&count={q_count}",
-                        token=token,
-                    )
-                    _handle_unauthorized(res)
-                    if isinstance(res, dict) and "error" in res:
-                        st.error(f"Error: {res['error']}")
-                    elif isinstance(res, dict) and "questions" in res:
-                        st.session_state[f"iq_questions_{selected_job_id}"] = res
-                    else:
-                        st.error("Failed to generate questions. Please ensure an AI API key (SARVAM_API_KEY or ANTHROPIC_API_KEY) is configured in your .env file.")
-
-            saved_q = st.session_state.get(f"iq_questions_{selected_job_id}")
-            if saved_q and "questions" in saved_q:
-                st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
-                st.markdown(f"<div style='font-size:14px;font-weight:600;margin-bottom:10px;'>Generated {saved_q.get('question_type')} Questions ({len(saved_q['questions'])})</div>", unsafe_allow_html=True)
-                for q in saved_q["questions"]:
-                    q_num = q.get("question_number", 1)
-                    q_text = q.get("question_text", "")
-                    q_t = q.get("question_type", q_type)
-                    s_type = q.get("sub_type", "General")
-                    est_dur = q.get("estimated_duration", "3-5 min response")
-                    st.markdown(f"""
-                    <div class='sh-card-sm' style='margin-bottom:10px;padding:14px 16px;'>
-                        <div style='font-size:14px;font-weight:600;color:#f8fafc;margin-bottom:6px;'><b>{q_num}.</b> {q_text}</div>
-                        <div style='font-size:12px;color:#94a3b8;'>{q_t} • {s_type} • {est_dur}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-        st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-section-heading'>Practice Question Generator (MCQ + Difficulty)</div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-page-subtitle' style='margin-bottom:14px;'>Generate difficulty-leveled practice questions, as open-ended prompts or multiple choice with answers.</div>", unsafe_allow_html=True)
-
-        if not jobs_list:
-            st.info("No saved job positions found. Please create one in the Job Matcher tab first.")
-        else:
-            pq_job_label = st.selectbox("Select Job Position", list(job_options.keys()), key="pq_job_select")
-            pq_job = job_options[pq_job_label]
-            pq_job_id = pq_job["job_id"]
-
-            pq_c1, pq_c2, pq_c3, pq_c4 = st.columns([1.3, 1, 1.2, 1])
-            with pq_c1:
-                pq_type = st.selectbox("Question Type", ["Technical", "Behavioral", "Scenario-based"], key="pq_type_select")
-            with pq_c2:
-                pq_difficulty = st.selectbox("Difficulty", ["Easy", "Medium", "Hard"], index=1, key="pq_difficulty_select")
-            with pq_c3:
-                pq_format = st.selectbox("Format", ["Open-ended", "Multiple Choice"], key="pq_format_select")
-            with pq_c4:
-                pq_count = st.number_input("Count", min_value=1, max_value=10, value=3, step=1, key="pq_count_input")
-
-            if st.button("Generate Practice Questions", type="primary", key="pq_generate_btn"):
-                with st.spinner(f"Generating {pq_difficulty} {pq_format} questions..."):
-                    res = api_request(
-                        "GET",
-                        f"/api/jobs/{pq_job_id}/interview-questions/practice"
-                        f"?question_type={pq_type}&difficulty={pq_difficulty}&question_format={pq_format}&count={pq_count}",
-                        token=token,
-                    )
-                    _handle_unauthorized(res)
-                    if isinstance(res, dict) and "error" in res:
-                        st.error(f"Error: {res['error']}")
-                    elif isinstance(res, dict) and "questions" in res:
-                        st.session_state[f"pq_questions_{pq_job_id}"] = res
-                    else:
-                        st.error("Failed to generate practice questions. Please ensure an AI API key is configured.")
-
-            saved_pq = st.session_state.get(f"pq_questions_{pq_job_id}")
-            if saved_pq and "questions" in saved_pq:
-                st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
-                st.markdown(
-                    f"<div style='font-size:14px;font-weight:600;margin-bottom:10px;'>"
-                    f"Generated {saved_pq.get('difficulty')} {saved_pq.get('question_format')} Questions "
-                    f"({len(saved_pq['questions'])})</div>",
-                    unsafe_allow_html=True,
-                )
-                for q in saved_pq["questions"]:
-                    q_num = q.get("question_number", 1)
-                    q_text = q.get("question_text", "")
-                    q_t = q.get("question_type", pq_type)
-                    s_type = q.get("sub_type", "General")
-                    est_dur = q.get("estimated_duration", "")
-                    diff = q.get("difficulty", pq_difficulty)
-                    if q.get("question_format") == "Multiple Choice" and q.get("options"):
-                        options_html = "".join(
-                            f"<div style='padding:6px 10px;margin:4px 0;border-radius:6px;background:rgba(148,163,184,0.08);'>"
-                            f"<b>{opt.get('label')}.</b> {opt.get('text')}</div>"
-                            for opt in q["options"]
-                        )
-                        st.markdown(f"""
-                        <div class='sh-card-sm' style='margin-bottom:10px;padding:14px 16px;'>
-                            <div style='font-size:14px;font-weight:600;color:#f8fafc;margin-bottom:6px;'><b>{q_num}.</b> {q_text}</div>
-                            <div style='font-size:12px;color:#94a3b8;margin-bottom:8px;'>{q_t} • {s_type} • {diff} • {est_dur}</div>
-                            {options_html}
-                        </div>
-                        """, unsafe_allow_html=True)
-                        with st.expander(f"Show answer — Q{q_num}"):
-                            st.markdown(f"**Correct option: {q.get('correct_option', '—')}**")
-                            if q.get("explanation"):
-                                st.markdown(q["explanation"])
-                    else:
-                        st.markdown(f"""
-                        <div class='sh-card-sm' style='margin-bottom:10px;padding:14px 16px;'>
-                            <div style='font-size:14px;font-weight:600;color:#f8fafc;margin-bottom:6px;'><b>{q_num}.</b> {q_text}</div>
-                            <div style='font-size:12px;color:#94a3b8;'>{q_t} • {s_type} • {diff} • {est_dur}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-        # ── AI Interview Simulation ──────────────────────────────────────────
-        st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-section-heading'>AI Interview Simulation</div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-page-subtitle' style='margin-bottom:14px;'>Conduct an interactive, role-specific simulated interview with AI-generated questions and natural follow-ups.</div>", unsafe_allow_html=True)
-
-        sim_c1, sim_c2 = st.columns(2)
-        with sim_c1:
-            sim_cand_opts = {
-                f"{_display_name(c.get('name'))} ({_display_email(c.get('email'))})": c.get("candidate_id")
-                for c in candidates if c.get("candidate_id") is not None
-            }
-            if sim_cand_opts:
-                sim_cand_label = st.selectbox("Select Candidate for Interview", list(sim_cand_opts.keys()), key="sim_cand_select")
-                sim_cand_id = sim_cand_opts[sim_cand_label]
-            else:
-                st.info("No candidates available.")
-                sim_cand_id = None
-
-        with sim_c2:
-            if jobs_list:
-                sim_job_opts = {
-                    f"{j['title']} · {j.get('department') or 'General'}": j["job_id"]
-                    for j in jobs_list
-                }
-                sim_job_label = st.selectbox("Select Target Job Position", list(sim_job_opts.keys()), key="sim_job_select")
-                sim_job_id = sim_job_opts[sim_job_label]
-            else:
-                st.info("No jobs available.")
-                sim_job_id = None
-
-        active_session_id = st.session_state.get("active_interview_session_id")
-
-        sim_btn_c1, sim_btn_c2 = st.columns([1.5, 1.5])
-        with sim_btn_c1:
-            if st.button("🚀 Start Interview", type="primary", key="btn_start_interview"):
-                if not sim_cand_id or not sim_job_id:
-                    st.error("Please select both a candidate and a job position.")
-                else:
-                    with st.spinner("Initializing interview session..."):
-                        create_payload = {"candidate_id": sim_cand_id, "job_id": sim_job_id}
-                        create_res = api_request("POST", "/api/interview-sessions", token=token, json=create_payload)
-                        _handle_unauthorized(create_res)
-                        if isinstance(create_res, dict) and "session_id" in create_res:
-                            new_sess_id = create_res["session_id"]
-                            st.session_state["active_interview_session_id"] = new_sess_id
-                            # Generate opening line
-                            resp_res = api_request("POST", f"/api/interview-sessions/{new_sess_id}/respond", token=token, json={})
-                            _handle_unauthorized(resp_res)
-                            if isinstance(resp_res, dict) and "transcript" in resp_res:
-                                st.session_state[f"session_data_{new_sess_id}"] = resp_res
-                            st.rerun()
-                        else:
-                            err_msg = create_res.get('error', 'Unknown error') if isinstance(create_res, dict) else str(create_res)
-                            st.error(f"Failed to start session: {err_msg}")
-
-        with sim_btn_c2:
-            if active_session_id:
-                if st.button("⏹ End Interview", key="btn_end_interview"):
-                    with st.spinner("Concluding interview..."):
-                        end_res = api_request("POST", f"/api/interview-sessions/{active_session_id}/complete", token=token)
-                        _handle_unauthorized(end_res)
-                        st.session_state.pop("active_interview_session_id", None)
-                        st.session_state.pop(f"session_data_{active_session_id}", None)
-                        st.success("Interview session marked as completed.")
-                        st.rerun()
-
-        # Render Active Interview Chat
-        if active_session_id:
-            session_data = api_request("GET", f"/api/interview-sessions/{active_session_id}", token=token)
-            _handle_unauthorized(session_data)
-            if isinstance(session_data, dict) and "transcript" in session_data:
-                transcript = session_data.get("transcript", [])
-                st.markdown(f"""
-                <div class='sh-card-sm' style='margin-top:12px;margin-bottom:12px;padding:10px 14px;'>
-                    <span style='color:#94a3b8;font-size:12px;'>Active Session #{active_session_id} · Candidate: <b>{session_data.get('candidate_name')}</b> · Role: <b>{session_data.get('job_title')}</b></span>
-                </div>
-                """, unsafe_allow_html=True)
-
-                chat_container = st.container()
-                with chat_container:
-                    for msg in transcript:
-                        role = msg.get("role")
-                        content = msg.get("content", "")
-                        if role == "interviewer":
-                            with st.chat_message("assistant"):
-                                st.markdown(content)
-                        else:
-                            with st.chat_message("user"):
-                                st.markdown(content)
-
-                if session_data.get("status") == "completed":
-                    st.markdown("<div style='padding:10px 14px;border-radius:6px;background:rgba(16,185,129,0.15);border:1px solid #10B981;color:#6ee7b7;font-size:13px;font-weight:600;margin-top:10px;'>✓ Interview session has been concluded.</div>", unsafe_allow_html=True)
-                    if st.button("Start Another Interview", key="btn_clear_sim_completed"):
-                        st.session_state.pop("active_interview_session_id", None)
-                        st.rerun()
-                else:
-                    user_input = st.chat_input("Type candidate's response here...", key="interview_chat_input")
-                    if user_input:
-                        with st.spinner("Interviewer is evaluating and responding..."):
-                            resp_res = api_request(
-                                "POST",
-                                f"/api/interview-sessions/{active_session_id}/respond",
-                                token=token,
-                                json={"message": user_input},
-                            )
-                            _handle_unauthorized(resp_res)
-                            st.rerun()
-
-        # ── Candidate Pipeline (ATS Status) ──────────────────────────────────
-        st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-section-heading'>Candidate Pipeline (ATS Status)</div>", unsafe_allow_html=True)
-        st.markdown("<div class='sh-page-subtitle' style='margin-bottom:14px;'>Track and advance candidates through the interview lifecycle.</div>", unsafe_allow_html=True)
-
-        with st.expander("➕ Add Candidate to Interview Pipeline", expanded=False):
-            with st.form("add_pipeline_form", clear_on_submit=True):
-                pipe_c1, pipe_c2 = st.columns(2)
-                with pipe_c1:
-                    cand_opts = {
-                        f"{_display_name(c.get('name'))} ({_display_email(c.get('email'))})": c.get("candidate_id")
-                        for c in candidates if c.get("candidate_id") is not None
-                    }
-                    if cand_opts:
-                        sel_cand_label = st.selectbox("Select Candidate", list(cand_opts.keys()), key="pipe_cand_select")
-                        sel_cand_id = cand_opts[sel_cand_label]
-                    else:
-                        st.info("No candidates found.")
-                        sel_cand_id = None
-                with pipe_c2:
-                    if jobs_list:
-                        pipe_job_opts = {
-                            f"{j['title']} · {j.get('department') or 'General'}": j["job_id"]
-                            for j in jobs_list
-                        }
-                        sel_pipe_job_label = st.selectbox("Assign to Job Position", list(pipe_job_opts.keys()), key="pipe_job_select")
-                        sel_pipe_job_id = pipe_job_opts[sel_pipe_job_label]
-                    else:
-                        st.info("No jobs available.")
-                        sel_pipe_job_id = None
-
-                schedule_date = st.date_input("Scheduled Date (optional, leave blank for in-progress)", value=None, key="pipe_sched_date")
-                submit_pipeline = st.form_submit_button("Add to Pipeline", type="primary")
-
-                if submit_pipeline:
-                    if not sel_cand_id or not sel_pipe_job_id:
-                        st.error("Please select both a candidate and a job position.")
-                    else:
-                        sched_str = None
-                        if schedule_date:
-                            if hasattr(schedule_date, "isoformat"):
-                                sched_str = f"{schedule_date.isoformat()}T09:00:00"
-                            elif isinstance(schedule_date, (list, tuple)) and schedule_date and hasattr(schedule_date[0], "isoformat"):
-                                sched_str = f"{schedule_date[0].isoformat()}T09:00:00"
-
-                        payload = {
-                            "candidate_id": sel_cand_id,
-                            "job_id": sel_pipe_job_id,
-                            "scheduled_at": sched_str,
-                        }
-                        res = api_request("POST", "/api/interview-sessions", token=token, json=payload)
-                        _handle_unauthorized(res)
-                        if isinstance(res, dict) and "error" in res:
-                            st.error(f"Failed to add to pipeline: {res['error']}")
-                        else:
-                            st.success("Candidate successfully added to interview pipeline!")
-                            st.rerun()
-
-        filter_col1, _ = st.columns([2, 2])
-        with filter_col1:
-            filter_job_opts = {"All Job Positions": None}
-            for j in jobs_list:
-                filter_job_opts[f"{j['title']} · {j.get('department') or 'General'}"] = j["job_id"]
-            selected_filter_label = st.selectbox("Filter Pipeline by Job", list(filter_job_opts.keys()), key="pipe_filter_job")
-            filtered_job_id = filter_job_opts[selected_filter_label]
-
-        sessions_url = f"/api/interview-sessions?job_id={filtered_job_id}" if filtered_job_id is not None else "/api/interview-sessions"
-        pipe_res = api_request("GET", sessions_url, token=token)
-        _handle_unauthorized(pipe_res)
-        sessions_list = pipe_res if isinstance(pipe_res, list) else []
-
-        if not sessions_list:
-            st.info("No candidate interview sessions found.")
-        else:
-            status_styles = {
-                "scheduled": ("#6366F1", "rgba(99,102,241,0.18)", "#a5b4fc"),
-                "in_progress": ("#F59E0B", "rgba(245,158,11,0.18)", "#fcd34d"),
-                "completed": ("#10B981", "rgba(16,185,129,0.15)", "#6ee7b7"),
-            }
-            for s in sessions_list:
-                s_id = s.get("session_id")
-                c_name = s.get("candidate_name") or f"Candidate #{s.get('candidate_id')}"
-                j_title = s.get("job_title") or "Unknown Job"
-                stat = s.get("status", "scheduled")
-                upd_time = s.get("updated_at", "")[:16].replace("T", " ")
-                border_c, bg_c, text_c = status_styles.get(stat, ("#94a3b8", "rgba(255,255,255,0.06)", "#94a3b8"))
-                stat_badge = f"<span style='display:inline-block;padding:3px 10px;border-radius:9999px;background:{bg_c};color:{text_c};border:1px solid {border_c};font-weight:600;font-size:12px;'>{stat.replace('_', ' ').title()}</span>"
-
-                sc_col1, sc_col2 = st.columns([3.5, 1])
-                with sc_col1:
-                    st.markdown(f"""
-                    <div class='sh-card-sm' style='margin-bottom:8px;padding:12px 16px;'>
-                        <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;'>
-                            <div style='font-size:14px;font-weight:600;color:#f8fafc;'>{c_name} · <span style='font-weight:400;color:#94a3b8;'>{j_title}</span></div>
-                            <div>{stat_badge}</div>
-                        </div>
-                        <div style='font-size:12px;color:#64748b;'>Last updated: {upd_time}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with sc_col2:
-                    if stat != "completed":
-                        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-                        if st.button("Mark Completed", key=f"mark_comp_{s_id}", use_container_width=True):
-                            comp_res = api_request("POST", f"/api/interview-sessions/{s_id}/complete", token=token)
-                            _handle_unauthorized(comp_res)
-                            st.rerun()
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# Entry point
+# Main Router
 # ---------------------------------------------------------------------------
 def main():
     token = st.session_state.get("auth_token")
@@ -2061,7 +2742,6 @@ def main():
             show_login()
         return
     show_dashboard()
-
 
 if __name__ == "__main__":
     main()

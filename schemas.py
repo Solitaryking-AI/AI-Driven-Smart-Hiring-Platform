@@ -256,6 +256,9 @@ class InterviewSessionResponse(BaseModel):
     job_title: str
     status: str
     transcript: List[InterviewMessage] = []
+    feedback: Optional[dict] = None
+    interview_type: Optional[str] = "mixed"
+    difficulty: Optional[str] = "Medium"
     scheduled_at: Optional[str] = None
     created_at: str
     updated_at: str
@@ -354,7 +357,7 @@ class JobResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_ALLOWED_ROLES = {"Recruiter", "HR Manager", "Admin"}
+_ALLOWED_ROLES = {"Recruiter", "HR Manager", "Admin", "Candidate"}
 
 
 class UserCreate(BaseModel):
@@ -363,8 +366,8 @@ class UserCreate(BaseModel):
     email: str
     password: str
     confirm_password: str
-    company_name: str
-    job_title: str          # "Recruiter" | "HR Manager" | "Admin"
+    company_name: Optional[str] = None
+    job_title: str          # "Recruiter" | "HR Manager" | "Admin" | "Candidate"
     phone_number: Optional[str] = None
 
     @field_validator("email")
@@ -390,10 +393,10 @@ class UserCreate(BaseModel):
     @classmethod
     def role_valid(cls, v: str) -> str:
         if v not in _ALLOWED_ROLES:
-            raise ValueError(f"job_title must be one of: {', '.join(_ALLOWED_ROLES)}")
+            raise ValueError(f"job_title must be one of: {', '.join(sorted(_ALLOWED_ROLES))}")
         return v
 
-    @field_validator("full_name", "company_name")
+    @field_validator("full_name")
     @classmethod
     def not_empty(cls, v: str) -> str:
         if not v or not v.strip():
@@ -401,9 +404,18 @@ class UserCreate(BaseModel):
         return v.strip()
 
     @model_validator(mode="after")
-    def passwords_match(self) -> "UserCreate":
+    def validate_fields(self) -> "UserCreate":
         if self.password != self.confirm_password:
             raise ValueError("Passwords do not match.")
+        if self.job_title != "Candidate":
+            if not self.company_name or not self.company_name.strip() or self.company_name.strip() == "N/A":
+                raise ValueError("Company name is required for recruiters and administrators.")
+            self.company_name = self.company_name.strip()
+        else:
+            if not self.company_name or not self.company_name.strip():
+                self.company_name = "Candidate"
+            else:
+                self.company_name = self.company_name.strip()
         return self
 
 
@@ -443,3 +455,76 @@ class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+
+# ---------------------------------------------------------------------------
+# Candidate Portal Specific schemas
+# ---------------------------------------------------------------------------
+
+class CandidateProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    education: Optional[List[Any]] = None
+    skills: Optional[List[str]] = None
+    experience: Optional[List[Any]] = None
+    certifications: Optional[List[Any]] = None
+    projects: Optional[List[Any]] = None
+
+
+class CandidateProfileResponse(BaseModel):
+    user_id: int
+    candidate_id: Optional[int] = None
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    education: List[Any] = []
+    skills: List[str] = []
+    experience: List[Any] = []
+    certifications: List[Any] = []
+    projects: List[Any] = []
+    resume_path: Optional[str] = None
+    stage: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class ResumeAnalysisRequest(BaseModel):
+    target_job_id: Optional[int] = None
+
+
+class ResumeAnalysisResponse(BaseModel):
+    analysis_id: int
+    user_id: int
+    candidate_id: Optional[int] = None
+    target_job_id: Optional[int] = None
+    target_job_title: Optional[str] = None
+    analysis: dict
+    created_at: str
+
+
+class PracticeAnswerSubmit(BaseModel):
+    job_id: Optional[int] = None
+    question_text: str
+    question_type: Optional[str] = "Technical"
+    difficulty: Optional[str] = "Medium"
+    candidate_answer: str
+
+
+class PracticeAnswerResponse(BaseModel):
+    answer_id: int
+    user_id: int
+    candidate_id: Optional[int] = None
+    job_id: Optional[int] = None
+    job_title: Optional[str] = None
+    question_text: str
+    question_type: Optional[str] = None
+    difficulty: Optional[str] = None
+    candidate_answer: str
+    feedback: dict
+    created_at: str
+
+
+class CandidateMockInterviewStart(BaseModel):
+    job_id: int
+    interview_type: Optional[str] = "mixed"  # "Technical" | "Behavioral" | "mixed"
+    difficulty: Optional[str] = "Medium"

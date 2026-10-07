@@ -13,12 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from pydantic import BaseModel, ValidationError
 from docx import Document
 
 from database import engine, get_db, init_db
-from models import Candidate, User, Job, InterviewSession
+from models import Candidate, User, Job, InterviewSession, ResumeAnalysis, PracticeAnswer
 from schemas import (
     CandidateCreate, CandidateResponse, CandidateListResponse,
     SkillFrequency, AnalyticsSummary, MatchResult, MatchBreakdown, HiringScoreBreakdown,
@@ -27,9 +27,13 @@ from schemas import (
     InterviewCandidateMessage,
     JobCreate, JobUpdate, JobResponse,
     UserCreate, UserLogin, UserResponse, Token,
+    CandidateProfileUpdate, CandidateProfileResponse,
+    ResumeAnalysisRequest, ResumeAnalysisResponse,
+    PracticeAnswerSubmit, PracticeAnswerResponse,
+    CandidateMockInterviewStart,
 )
 from auth import hash_password, verify_password, create_access_token, decode_access_token
-from services import matching_engine, hiring_score, skill_gap_analysis, interview_assistant
+from services import matching_engine, hiring_score, skill_gap_analysis, interview_assistant, candidate_service
 import file_loader
 import parser
 
@@ -120,21 +124,47 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/api/auth/login", response_model=Token)
 def login(payload: UserLogin, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.email.strip().lower()).first()
-    if not user or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account is disabled. Contact your administrator.",
-        )
+    ident = payload.email.strip()
+    ident_lower = ident.lower()
 
-    token = create_access_token({"sub": user.email})
-    return Token(access_token=token, user=UserResponse.from_orm_model(user))
+    # 1. Primary lookup by exact email match
+    exact_user = db.query(User).filter(func.lower(User.email) == ident_lower).first()
+    if exact_user and verify_password(payload.password, exact_user.password_hash):
+        if not exact_user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your account is disabled. Contact your administrator.",
+            )
+        token = create_access_token({"sub": exact_user.email})
+        return Token(access_token=token, user=UserResponse.from_orm_model(exact_user))
+
+    # 2. Secondary lookup by account username / full_name or email prefix
+    candidates_matching = (
+        db.query(User)
+        .filter(
+            or_(
+                func.lower(User.email) == ident_lower,
+                func.lower(User.full_name) == ident_lower,
+                func.lower(User.email).like(f"{ident_lower}@%"),
+            )
+        )
+        .all()
+    )
+    for u in candidates_matching:
+        if verify_password(payload.password, u.password_hash):
+            if not u.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Your account is disabled. Contact your administrator.",
+                )
+            token = create_access_token({"sub": u.email})
+            return Token(access_token=token, user=UserResponse.from_orm_model(u))
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Incorrect email or password.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 @app.get("/api/auth/me", response_model=UserResponse)
@@ -162,21 +192,27 @@ async def upload_candidate(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error processing file: {str(e)}")
 
-    db_candidate = db.query(Candidate).filter(Candidate.resume_path == file.filename).first()
+    db_candidate = None
+    email_val = parsed_data.get("email")
+    if email_val:
+        db_candidate = db.query(Candidate).filter(Candidate.email == email_val).first()
+    if not db_candidate:
+        db_candidate = db.query(Candidate).filter(Candidate.resume_path == file.filename).first()
 
     if db_candidate:
-        db_candidate.name = parsed_data.get("name")
-        db_candidate.email = parsed_data.get("email")
-        db_candidate.phone = parsed_data.get("phone")
+        db_candidate.name = parsed_data.get("name") or db_candidate.name
+        db_candidate.email = email_val or db_candidate.email
+        db_candidate.phone = parsed_data.get("phone") or db_candidate.phone
         db_candidate.education = json.dumps(parsed_data.get("education", []))
         db_candidate.skills = json.dumps(parsed_data.get("skills", []))
         db_candidate.experience = json.dumps(parsed_data.get("experience", []))
         db_candidate.certifications = json.dumps(parsed_data.get("certifications", []))
         db_candidate.projects = json.dumps(parsed_data.get("projects", []))
+        db_candidate.resume_path = file.filename
     else:
         db_candidate = Candidate(
             name=parsed_data.get("name"),
-            email=parsed_data.get("email"),
+            email=email_val,
             phone=parsed_data.get("phone"),
             education=json.dumps(parsed_data.get("education", [])),
             skills=json.dumps(parsed_data.get("skills", [])),
@@ -196,7 +232,7 @@ async def upload_candidate(
 def get_candidates(
     search: Optional[str] = None,
     skip: int = 0,
-    limit: int = Query(500, ge=1, le=10000),
+    limit: int = Query(100, ge=1, le=50000),
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
@@ -997,6 +1033,13 @@ def get_practice_questions(
 def _session_to_response(session: "InterviewSession", db: Session) -> dict:
     candidate = db.query(Candidate).filter(Candidate.candidate_id == session.candidate_id).first()
     job = db.query(Job).filter(Job.job_id == session.job_id).first()
+    feedback_data = None
+    if getattr(session, "feedback", None):
+        try:
+            feedback_data = json.loads(session.feedback)
+        except Exception:
+            feedback_data = {"raw": session.feedback}
+
     return {
         "session_id": session.session_id,
         "candidate_id": session.candidate_id,
@@ -1005,6 +1048,9 @@ def _session_to_response(session: "InterviewSession", db: Session) -> dict:
         "job_title": job.title if job else "Unknown Job",
         "status": session.status,
         "transcript": json.loads(session.transcript) if session.transcript else [],
+        "feedback": feedback_data,
+        "interview_type": getattr(session, "interview_type", "mixed") or "mixed",
+        "difficulty": getattr(session, "difficulty", "Medium") or "Medium",
         "scheduled_at": session.scheduled_at.isoformat() if session.scheduled_at else None,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
@@ -1098,14 +1144,45 @@ def list_interview_sessions(
     job_id: Optional[int] = None, status: Optional[str] = None,
     db: Session = Depends(get_db), _user: User = Depends(get_current_user),
 ):
-    """Powers the ATS-style pipeline view."""
+    """Powers the ATS-style pipeline view with batched candidate/job lookups."""
     query = db.query(InterviewSession)
     if job_id is not None:
         query = query.filter(InterviewSession.job_id == job_id)
     if status is not None:
         query = query.filter(InterviewSession.status == status)
     sessions = query.order_by(InterviewSession.updated_at.desc()).all()
-    return [_session_to_response(s, db) for s in sessions]
+    if not sessions:
+        return []
+
+    cand_ids = {s.candidate_id for s in sessions if s.candidate_id is not None}
+    job_ids = {s.job_id for s in sessions if s.job_id is not None}
+    cand_map = {
+        c.candidate_id: c.name
+        for c in db.query(Candidate.candidate_id, Candidate.name).filter(Candidate.candidate_id.in_(cand_ids)).all()
+    } if cand_ids else {}
+    job_map = {
+        j.job_id: j.title
+        for j in db.query(Job.job_id, Job.title).filter(Job.job_id.in_(job_ids)).all()
+    } if job_ids else {}
+
+    results = []
+    for s in sessions:
+        results.append({
+            "session_id": s.session_id,
+            "candidate_id": s.candidate_id,
+            "candidate_name": cand_map.get(s.candidate_id),
+            "job_id": s.job_id,
+            "job_title": job_map.get(s.job_id) or "Unknown Job",
+            "status": s.status,
+            "transcript": json.loads(s.transcript) if s.transcript else [],
+            "feedback": json.loads(s.feedback) if getattr(s, "feedback", None) else None,
+            "interview_type": getattr(s, "interview_type", "mixed") or "mixed",
+            "difficulty": getattr(s, "difficulty", "Medium") or "Medium",
+            "scheduled_at": s.scheduled_at.isoformat() if s.scheduled_at else None,
+            "created_at": s.created_at.isoformat(),
+            "updated_at": s.updated_at.isoformat(),
+        })
+    return results
 
 
 @app.get("/api/interview-sessions/{session_id}", response_model=InterviewSessionResponse)
@@ -1118,6 +1195,494 @@ def get_interview_session(
     return _session_to_response(session, db)
 
 
+# ---------------------------------------------------------------------------
+# Candidate Portal Endpoints
+# ---------------------------------------------------------------------------
+
+def _get_or_create_candidate_for_user(user: User, db: Session) -> Candidate:
+    cand = db.query(Candidate).filter(Candidate.user_id == user.user_id).first()
+    if not cand:
+        cand = db.query(Candidate).filter(Candidate.email == user.email, Candidate.user_id == None).first()
+        if cand:
+            cand.user_id = user.user_id
+            db.commit()
+            db.refresh(cand)
+        else:
+            cand = Candidate(
+                user_id=user.user_id,
+                name=user.full_name,
+                email=user.email,
+                phone=user.phone_number,
+                education="[]",
+                skills="[]",
+                experience="[]",
+                certifications="[]",
+                projects="[]",
+            )
+            db.add(cand)
+            db.commit()
+            db.refresh(cand)
+    return cand
+
+
+def _candidate_to_profile_response(cand: Optional[Candidate], user: User) -> dict:
+    def _parse(field):
+        if not field:
+            return []
+        if isinstance(field, list):
+            return field
+        try:
+            val = json.loads(field)
+            return val if isinstance(val, list) else []
+        except Exception:
+            return []
+
+    return {
+        "user_id": user.user_id,
+        "candidate_id": cand.candidate_id if cand else None,
+        "name": cand.name if cand and cand.name else user.full_name,
+        "email": cand.email if cand and cand.email else user.email,
+        "phone": cand.phone if cand and cand.phone else user.phone_number,
+        "education": _parse(cand.education) if cand else [],
+        "skills": _parse(cand.skills) if cand else [],
+        "experience": _parse(cand.experience) if cand else [],
+        "certifications": _parse(cand.certifications) if cand else [],
+        "projects": _parse(cand.projects) if cand else [],
+        "resume_path": cand.resume_path if cand else None,
+        "stage": cand.stage if cand else None,
+        "created_at": cand.created_at if cand else user.created_at,
+    }
+
+
+@app.get("/api/candidate/profile", response_model=CandidateProfileResponse)
+def get_candidate_profile(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cand = db.query(Candidate).filter(Candidate.user_id == user.user_id).first()
+    return _candidate_to_profile_response(cand, user)
+
+
+@app.put("/api/candidate/profile", response_model=CandidateProfileResponse)
+def update_candidate_profile(
+    payload: CandidateProfileUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cand = _get_or_create_candidate_for_user(user, db)
+    if payload.name is not None:
+        cand.name = payload.name
+    if payload.email is not None:
+        cand.email = payload.email
+    if payload.phone is not None:
+        cand.phone = payload.phone
+    if payload.education is not None:
+        cand.education = json.dumps(payload.education)
+    if payload.skills is not None:
+        cand.skills = json.dumps(payload.skills)
+    if payload.experience is not None:
+        cand.experience = json.dumps(payload.experience)
+    if payload.certifications is not None:
+        cand.certifications = json.dumps(payload.certifications)
+    if payload.projects is not None:
+        cand.projects = json.dumps(payload.projects)
+
+    db.commit()
+    db.refresh(cand)
+    return _candidate_to_profile_response(cand, user)
+
+
+@app.post("/api/candidate/resume/upload", response_model=CandidateProfileResponse)
+async def upload_candidate_resume(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    filename = file.filename or "resume.pdf"
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in [".pdf", ".docx", ".txt"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file format. Please upload a .pdf, .docx, or .txt resume.",
+        )
+
+    os.makedirs("uploads", exist_ok=True)
+    file_path = os.path.join("uploads", f"user_{user.user_id}_{filename}")
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    try:
+        raw_text = file_loader.extract_text(file_path)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Failed to extract text from file: {e}")
+
+    extracted = parser.extract_candidate_info(raw_text)
+
+    cand = _get_or_create_candidate_for_user(user, db)
+    if extracted.get("name") and extracted["name"] != "Unknown Candidate":
+        cand.name = extracted["name"]
+    if extracted.get("email"):
+        cand.email = extracted["email"]
+    if extracted.get("phone"):
+        cand.phone = extracted["phone"]
+    if extracted.get("education"):
+        cand.education = json.dumps(extracted["education"])
+    if extracted.get("skills"):
+        cand.skills = json.dumps(extracted["skills"])
+    if extracted.get("experience"):
+        cand.experience = json.dumps(extracted["experience"])
+    if extracted.get("certifications"):
+        cand.certifications = json.dumps(extracted["certifications"])
+    if extracted.get("projects"):
+        cand.projects = json.dumps(extracted["projects"])
+    cand.resume_path = filename
+
+    db.commit()
+    db.refresh(cand)
+    return _candidate_to_profile_response(cand, user)
+
+
+@app.post("/api/candidate/resume/analyze", response_model=ResumeAnalysisResponse)
+def analyze_candidate_resume(
+    payload: Optional[ResumeAnalysisRequest] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cand = _get_or_create_candidate_for_user(user, db)
+    c_dict = _candidate_to_dict(cand)
+
+    target_job_dict = None
+    target_job_id = payload.target_job_id if payload else None
+    target_job_title = None
+
+    if target_job_id:
+        job = db.query(Job).filter(Job.job_id == target_job_id).first()
+        if job:
+            target_job_dict = _job_to_dict(job)
+            target_job_title = job.title
+
+    analysis = candidate_service.generate_resume_analysis(c_dict, target_job_dict)
+
+    record = ResumeAnalysis(
+        user_id=user.user_id,
+        candidate_id=cand.candidate_id,
+        target_job_id=target_job_id,
+        analysis_data=json.dumps(analysis),
+        created_at=datetime.utcnow(),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    return {
+        "analysis_id": record.analysis_id,
+        "user_id": record.user_id,
+        "candidate_id": record.candidate_id,
+        "target_job_id": record.target_job_id,
+        "target_job_title": target_job_title,
+        "analysis": analysis,
+        "created_at": record.created_at.isoformat(),
+    }
+
+
+@app.get("/api/candidate/resume/analysis", response_model=ResumeAnalysisResponse)
+def get_candidate_resume_analysis(
+    target_job_id: Optional[int] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(ResumeAnalysis).filter(ResumeAnalysis.user_id == user.user_id)
+    if target_job_id is not None:
+        query = query.filter(ResumeAnalysis.target_job_id == target_job_id)
+    record = query.order_by(ResumeAnalysis.created_at.desc()).first()
+
+    if not record:
+        req = ResumeAnalysisRequest(target_job_id=target_job_id)
+        return analyze_candidate_resume(req, user=user, db=db)
+
+    job_title = None
+    if record.target_job_id:
+        job = db.query(Job).filter(Job.job_id == record.target_job_id).first()
+        if job:
+            job_title = job.title
+
+    return {
+        "analysis_id": record.analysis_id,
+        "user_id": record.user_id,
+        "candidate_id": record.candidate_id,
+        "target_job_id": record.target_job_id,
+        "target_job_title": job_title,
+        "analysis": json.loads(record.analysis_data),
+        "created_at": record.created_at.isoformat(),
+    }
+
+
+@app.get("/api/candidate/practice-questions", response_model=PracticeQuestionSet)
+def get_candidate_practice_questions(
+    job_id: Optional[int] = None,
+    question_type: Literal["Technical", "Behavioral", "Scenario-based"] = "Technical",
+    difficulty: Literal["Easy", "Medium", "Hard"] = "Medium",
+    question_format: Literal["Open-ended", "Multiple Choice"] = "Open-ended",
+    count: int = Query(3, ge=1, le=10),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if job_id:
+        job = db.query(Job).filter(Job.job_id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        job_dict = _job_to_dict(job)
+    else:
+        cand = _get_or_create_candidate_for_user(user, db)
+        skills = json.loads(cand.skills) if cand.skills else []
+        job_dict = {
+            "job_id": 0,
+            "title": "Software Engineering Candidate",
+            "seniority": "Mid-Level",
+            "min_experience_years": 2,
+            "required_skills": skills[:5] if skills else ["Python", "SQL", "Git"],
+            "nice_to_have_skills": [],
+            "description": "Practice interview questions for technical candidates.",
+        }
+
+    try:
+        return interview_assistant.generate_practice_questions(
+            job_dict, question_type, difficulty, question_format, count
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/api/candidate/practice-answers", response_model=PracticeAnswerResponse)
+def submit_candidate_practice_answer(
+    payload: PracticeAnswerSubmit,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cand = _get_or_create_candidate_for_user(user, db)
+    job_title = "Software Engineer"
+    if payload.job_id:
+        job = db.query(Job).filter(Job.job_id == payload.job_id).first()
+        if job:
+            job_title = job.title
+
+    feedback = candidate_service.evaluate_practice_answer(
+        question_text=payload.question_text,
+        candidate_answer=payload.candidate_answer,
+        question_type=payload.question_type or "Technical",
+        difficulty=payload.difficulty or "Medium",
+        job_title=job_title,
+    )
+
+    record = PracticeAnswer(
+        user_id=user.user_id,
+        candidate_id=cand.candidate_id,
+        job_id=payload.job_id,
+        question_text=payload.question_text,
+        question_type=payload.question_type or "Technical",
+        difficulty=payload.difficulty or "Medium",
+        candidate_answer=payload.candidate_answer,
+        feedback=json.dumps(feedback),
+        created_at=datetime.utcnow(),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    return {
+        "answer_id": record.answer_id,
+        "user_id": record.user_id,
+        "candidate_id": record.candidate_id,
+        "job_id": record.job_id,
+        "job_title": job_title,
+        "question_text": record.question_text,
+        "question_type": record.question_type,
+        "difficulty": record.difficulty,
+        "candidate_answer": record.candidate_answer,
+        "feedback": feedback,
+        "created_at": record.created_at.isoformat(),
+    }
+
+
+@app.get("/api/candidate/practice-history", response_model=List[PracticeAnswerResponse])
+def get_candidate_practice_history(
+    job_id: Optional[int] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(PracticeAnswer).filter(PracticeAnswer.user_id == user.user_id)
+    if job_id is not None:
+        query = query.filter(PracticeAnswer.job_id == job_id)
+    records = query.order_by(PracticeAnswer.created_at.desc()).all()
+
+    job_ids = {r.job_id for r in records if r.job_id}
+    job_map = {j.job_id: j.title for j in db.query(Job.job_id, Job.title).filter(Job.job_id.in_(job_ids)).all()} if job_ids else {}
+
+    results = []
+    for r in records:
+        try:
+            fb = json.loads(r.feedback)
+        except Exception:
+            fb = {}
+        results.append({
+            "answer_id": r.answer_id,
+            "user_id": r.user_id,
+            "candidate_id": r.candidate_id,
+            "job_id": r.job_id,
+            "job_title": job_map.get(r.job_id) or "General Practice",
+            "question_text": r.question_text,
+            "question_type": r.question_type,
+            "difficulty": r.difficulty,
+            "candidate_answer": r.candidate_answer,
+            "feedback": fb,
+            "created_at": r.created_at.isoformat(),
+        })
+    return results
+
+
+@app.post("/api/candidate/mock-interview/start", response_model=InterviewSessionResponse)
+def start_candidate_mock_interview(
+    payload: CandidateMockInterviewStart,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = db.query(Job).filter(Job.job_id == payload.job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    cand = _get_or_create_candidate_for_user(user, db)
+
+    session = InterviewSession(
+        candidate_id=cand.candidate_id,
+        job_id=payload.job_id,
+        status="in_progress",
+        transcript="[]",
+        interview_type=payload.interview_type or "mixed",
+        difficulty=payload.difficulty or "Medium",
+        created_by=user.user_id,
+        created_at=datetime.utcnow(),
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    job_dict = _job_to_dict(job)
+    c_dict = _candidate_to_dict(cand)
+    try:
+        opening = interview_assistant.get_interview_response(job_dict, c_dict, [])
+    except Exception:
+        opening = f"Hello {cand.name or 'there'}, welcome to your interview for the {job.title} role! To begin, could you tell me a little about your technical background and what brings you to this role?"
+
+    transcript = [{"role": "interviewer", "content": opening, "timestamp": datetime.now(timezone.utc).isoformat()}]
+    session.transcript = json.dumps(transcript)
+    db.commit()
+    db.refresh(session)
+
+    return _session_to_response(session, db)
+
+
+@app.post("/api/candidate/mock-interview/{session_id}/respond", response_model=InterviewSessionResponse)
+def respond_candidate_mock_interview(
+    session_id: int,
+    payload: InterviewCandidateMessage,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = db.query(InterviewSession).filter(InterviewSession.session_id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+    if session.created_by != user.user_id:
+        cand = db.query(Candidate).filter(Candidate.candidate_id == session.candidate_id).first()
+        if not cand or cand.user_id != user.user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this interview session")
+
+    if session.status == "completed":
+        raise HTTPException(status_code=400, detail="This interview session has already been completed")
+
+    candidate = db.query(Candidate).filter(Candidate.candidate_id == session.candidate_id).first()
+    job = db.query(Job).filter(Job.job_id == session.job_id).first()
+    transcript = json.loads(session.transcript) if session.transcript else []
+
+    if payload.message:
+        transcript.append({"role": "candidate", "content": payload.message, "timestamp": datetime.now(timezone.utc).isoformat()})
+
+    job_dict = _job_to_dict(job)
+    c_dict = _candidate_to_dict(candidate)
+    try:
+        reply = interview_assistant.get_interview_response(job_dict, c_dict, transcript)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    transcript.append({"role": "interviewer", "content": reply, "timestamp": datetime.now(timezone.utc).isoformat()})
+
+    session.transcript = json.dumps(transcript)
+    session.status = "in_progress"
+    db.commit()
+    db.refresh(session)
+    return _session_to_response(session, db)
+
+
+@app.post("/api/candidate/mock-interview/{session_id}/complete", response_model=InterviewSessionResponse)
+def complete_candidate_mock_interview(
+    session_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = db.query(InterviewSession).filter(InterviewSession.session_id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+    if session.created_by != user.user_id:
+        cand = db.query(Candidate).filter(Candidate.candidate_id == session.candidate_id).first()
+        if not cand or cand.user_id != user.user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this interview session")
+
+    candidate = db.query(Candidate).filter(Candidate.candidate_id == session.candidate_id).first()
+    job = db.query(Job).filter(Job.job_id == session.job_id).first()
+    transcript = json.loads(session.transcript) if session.transcript else []
+
+    job_dict = _job_to_dict(job)
+    c_dict = _candidate_to_dict(candidate)
+
+    evaluation = candidate_service.evaluate_mock_interview(job_dict, c_dict, transcript)
+
+    session.status = "completed"
+    session.feedback = json.dumps(evaluation)
+    db.commit()
+    db.refresh(session)
+    return _session_to_response(session, db)
+
+
+@app.get("/api/candidate/mock-interviews", response_model=List[InterviewSessionResponse])
+def list_candidate_mock_interviews(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cand = db.query(Candidate).filter(Candidate.user_id == user.user_id).first()
+    user_cand_id = cand.candidate_id if cand else -1
+
+    sessions = (
+        db.query(InterviewSession)
+        .filter(or_(InterviewSession.created_by == user.user_id, InterviewSession.candidate_id == user_cand_id))
+        .order_by(InterviewSession.updated_at.desc())
+        .all()
+    )
+    return [_session_to_response(s, db) for s in sessions]
+
+
+@app.get("/api/candidate/mock-interviews/{session_id}", response_model=InterviewSessionResponse)
+def get_candidate_mock_interview(
+    session_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = db.query(InterviewSession).filter(InterviewSession.session_id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Interview session not found")
+    if session.created_by != user.user_id:
+        cand = db.query(Candidate).filter(Candidate.candidate_id == session.candidate_id).first()
+        if not cand or cand.user_id != user.user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this interview session")
+    return _session_to_response(session, db)
 
 
 if __name__ == "__main__":
