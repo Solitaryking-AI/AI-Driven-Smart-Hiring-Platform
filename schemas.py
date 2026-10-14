@@ -427,6 +427,90 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     email: str
     password: str
+    role: Optional[str] = None
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v_clean = v.strip()
+        if not v_clean:
+            return None
+        allowed = {"candidate": "Candidate", "recruiter": "Recruiter", "admin": "Admin"}
+        if v_clean.lower() not in allowed:
+            raise ValueError(f"Invalid role '{v}'. Must be one of: Candidate, Recruiter, Admin.")
+        return allowed[v_clean.lower()]
+
+
+class ProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    company_name: Optional[str] = None
+    phone_number: Optional[str] = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v_clean = v.strip()
+        if not v_clean:
+            raise ValueError("Full name cannot be blank.")
+        if len(v_clean) > 255:
+            raise ValueError("Full name cannot exceed 255 characters.")
+        return v_clean
+
+    @field_validator("company_name")
+    @classmethod
+    def validate_company_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v_clean = v.strip()
+        if not v_clean:
+            raise ValueError("Company name cannot be blank.")
+        if len(v_clean) > 255:
+            raise ValueError("Company name cannot exceed 255 characters.")
+        return v_clean
+
+    @field_validator("phone_number")
+    @classmethod
+    def validate_phone_number(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v_clean = v.strip()
+        if not v_clean:
+            return None
+        import re
+        if not re.match(r"^[0-9+\-()\s]{7,20}$", v_clean):
+            raise ValueError("Invalid phone number format. Must contain 7 to 20 digits, spaces, or +-().")
+        return v_clean
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        if not v:
+            raise ValueError("New password cannot be empty.")
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("Password cannot exceed 72 bytes.")
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters long.")
+        return v
+
+    @model_validator(mode="after")
+    def passwords_match(self) -> "PasswordChange":
+        if self.new_password != self.confirm_password:
+            raise ValueError("New passwords do not match.")
+        return self
 
 
 class UserResponse(BaseModel):

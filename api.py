@@ -31,7 +31,7 @@ from schemas import (
     InterviewQuestionSet, PracticeQuestionSet, InterviewMessage, InterviewSessionResponse, InterviewSessionCreate,
     InterviewCandidateMessage,
     JobCreate, JobUpdate, JobResponse,
-    UserCreate, UserLogin, UserResponse, Token,
+    UserCreate, UserLogin, UserResponse, Token, ProfileUpdate, PasswordChange,
     CandidateProfileUpdate, CandidateProfileResponse,
     ResumeAnalysisRequest, ResumeAnalysisResponse,
     PracticeAnswerSubmit, PracticeAnswerResponse,
@@ -240,6 +240,60 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
     return Token(access_token=token, user=UserResponse.from_orm_model(db_user))
 
 
+def _authenticate_and_finalize_login(user: User, payload: UserLogin, db: Session) -> Token:
+    if user.job_title not in SUPPORTED_ROLES:
+        audit.log_event(
+            db,
+            actor=user.email,
+            action="login_failure",
+            target_type="user",
+            target_id=user.user_id,
+            details={"reason": "role_retired"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The HR Manager role has been retired and is no longer supported. Please contact your administrator.",
+        )
+    if not user.is_active:
+        audit.log_event(
+            db,
+            actor=user.email,
+            action="login_failure",
+            target_type="user",
+            target_id=user.user_id,
+            details={"reason": "account_disabled"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account is disabled. Contact your administrator.",
+        )
+    if payload.role and payload.role.strip().lower() != (user.job_title or "").strip().lower():
+        audit.log_event(
+            db,
+            actor=user.email,
+            action="login_failure",
+            target_type="user",
+            target_id=user.user_id,
+            details={"reason": "role_mismatch", "attempted_role": payload.role, "user_role": user.job_title},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"This account is not registered as a {payload.role}. Select the correct role to sign in.",
+        )
+    user.last_login_at = datetime.now(timezone.utc)
+    db.commit()
+    audit.log_event(
+        db,
+        actor=user,
+        action="login_success",
+        target_type="user",
+        target_id=user.user_id,
+        details={"email": user.email, "role": user.job_title},
+    )
+    token = create_access_token({"sub": user.email})
+    return Token(access_token=token, user=UserResponse.from_orm_model(user))
+
+
 @app.post("/api/auth/login", response_model=Token)
 def login(payload: UserLogin, db: Session = Depends(get_db)):
     ident = payload.email.strip()
@@ -248,44 +302,7 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
     # 1. Primary lookup by exact email match
     exact_user = db.query(User).filter(func.lower(User.email) == ident_lower).first()
     if exact_user and verify_password(payload.password, exact_user.password_hash):
-        if exact_user.job_title not in SUPPORTED_ROLES:
-            audit.log_event(
-                db,
-                actor=exact_user.email,
-                action="login_failure",
-                target_type="user",
-                target_id=exact_user.user_id,
-                details={"reason": "role_retired"},
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="The HR Manager role has been retired and is no longer supported. Please contact your administrator.",
-            )
-        if not exact_user.is_active:
-            audit.log_event(
-                db,
-                actor=exact_user.email,
-                action="login_failure",
-                target_type="user",
-                target_id=exact_user.user_id,
-                details={"reason": "account_disabled"},
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Your account is disabled. Contact your administrator.",
-            )
-        exact_user.last_login_at = datetime.now(timezone.utc)
-        db.commit()
-        audit.log_event(
-            db,
-            actor=exact_user,
-            action="login_success",
-            target_type="user",
-            target_id=exact_user.user_id,
-            details={"email": exact_user.email, "role": exact_user.job_title},
-        )
-        token = create_access_token({"sub": exact_user.email})
-        return Token(access_token=token, user=UserResponse.from_orm_model(exact_user))
+        return _authenticate_and_finalize_login(exact_user, payload, db)
 
     # 2. Secondary lookup by account username / full_name or email prefix
     candidates_matching = (
@@ -301,44 +318,7 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
     )
     for u in candidates_matching:
         if verify_password(payload.password, u.password_hash):
-            if u.job_title not in SUPPORTED_ROLES:
-                audit.log_event(
-                    db,
-                    actor=u.email,
-                    action="login_failure",
-                    target_type="user",
-                    target_id=u.user_id,
-                    details={"reason": "role_retired"},
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="The HR Manager role has been retired and is no longer supported. Please contact your administrator.",
-                )
-            if not u.is_active:
-                audit.log_event(
-                    db,
-                    actor=u.email,
-                    action="login_failure",
-                    target_type="user",
-                    target_id=u.user_id,
-                    details={"reason": "account_disabled"},
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Your account is disabled. Contact your administrator.",
-                )
-            u.last_login_at = datetime.now(timezone.utc)
-            db.commit()
-            audit.log_event(
-                db,
-                actor=u,
-                action="login_success",
-                target_type="user",
-                target_id=u.user_id,
-                details={"email": u.email, "role": u.job_title},
-            )
-            token = create_access_token({"sub": u.email})
-            return Token(access_token=token, user=UserResponse.from_orm_model(u))
+            return _authenticate_and_finalize_login(u, payload, db)
 
     audit.log_event(
         db,
@@ -357,6 +337,85 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
 @app.get("/api/auth/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
     return UserResponse.from_orm_model(current_user)
+
+
+@app.get("/api/auth/profile", response_model=UserResponse)
+def get_profile(
+    current_user: User = Depends(require_roles("Recruiter", "Admin")),
+):
+    return UserResponse.from_orm_model(current_user)
+
+
+@app.put("/api/auth/profile", response_model=UserResponse)
+def update_profile(
+    payload: ProfileUpdate,
+    current_user: User = Depends(require_roles("Recruiter", "Admin")),
+    db: Session = Depends(get_db),
+):
+    changed = {}
+    data = payload.model_dump(exclude_unset=True)
+
+    if "full_name" in data and data["full_name"] != current_user.full_name:
+        changed["full_name"] = {"from": current_user.full_name, "to": data["full_name"]}
+        current_user.full_name = data["full_name"]
+
+    if "company_name" in data and data["company_name"] != current_user.company_name:
+        changed["company_name"] = {"from": current_user.company_name, "to": data["company_name"]}
+        current_user.company_name = data["company_name"]
+
+    if "phone_number" in data and data["phone_number"] != current_user.phone_number:
+        changed["phone_number"] = {"from": current_user.phone_number, "to": data["phone_number"]}
+        current_user.phone_number = data["phone_number"]
+
+    if changed:
+        db.commit()
+        db.refresh(current_user)
+        audit.log_event(
+            db,
+            actor=current_user,
+            action="update_profile",
+            target_type="user",
+            target_id=current_user.user_id,
+            details={"changed": changed},
+        )
+
+    return UserResponse.from_orm_model(current_user)
+
+
+@app.post("/api/auth/change-password")
+def change_password(
+    payload: PasswordChange,
+    current_user: User = Depends(require_roles("Recruiter", "Admin")),
+    db: Session = Depends(get_db),
+):
+    if not verify_password(payload.current_password, current_user.password_hash):
+        audit.log_event(
+            db,
+            actor=current_user,
+            action="change_password_failure",
+            target_type="user",
+            target_id=current_user.user_id,
+            details={"reason": "invalid_current_password"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect.",
+        )
+
+    current_user.password_hash = hash_password(payload.new_password)
+    db.commit()
+    db.refresh(current_user)
+
+    audit.log_event(
+        db,
+        actor=current_user,
+        action="change_password",
+        target_type="user",
+        target_id=current_user.user_id,
+        details={"email": current_user.email},
+    )
+
+    return {"message": "Password changed successfully."}
 
 
 # ---------------------------------------------------------------------------
