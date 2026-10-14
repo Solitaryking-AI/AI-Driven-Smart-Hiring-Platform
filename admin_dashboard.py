@@ -26,6 +26,7 @@ from ui_common import (
     render_admin_topbar,
     get_plotly_layout,
     _esc,
+    render_profile_page,
 )
 
 
@@ -129,6 +130,13 @@ def show_admin_dashboard(token: str, user: dict):
             st.session_state["admin_nav"] = "Platform Settings & Backup"
             st.rerun()
 
+        # Group 7: ACCOUNT
+        st.markdown("<div class='sh-nav-group-label' style='color:#818cf8;'>Account</div>", unsafe_allow_html=True)
+        if st.button(f"{'▸ ' if active_nav == 'My Profile' else '  '}My Profile", key="admin_nav_profile", use_container_width=True,
+                     type="primary" if active_nav == "My Profile" else "secondary"):
+            st.session_state["admin_nav"] = "My Profile"
+            st.rerun()
+
         st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
 
         theme_text = "☀️ Light Mode" if current_theme == "dark" else "🌙 Dark Mode"
@@ -159,6 +167,8 @@ def show_admin_dashboard(token: str, user: dict):
         _show_ai_usage_monitor(token)
     elif active_nav == "Platform Settings & Backup":
         _show_platform_settings_and_backup(token)
+    elif active_nav == "My Profile":
+        render_profile_page(token, user, role_label="Admin")
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +773,8 @@ def _show_audit_log(token: str):
             "login_success",
             "login_failure",
             "register_success",
+            "update_profile",
+            "change_password",
         ]
         f_action = st.selectbox("Filter by Action Type", action_choices, key="audit_filter_action")
     with c3:

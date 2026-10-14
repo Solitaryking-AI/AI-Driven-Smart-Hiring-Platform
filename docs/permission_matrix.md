@@ -26,8 +26,11 @@ This document defines the strict role separation and authorization boundaries im
 | HTTP Method | Route | Public | Candidate | Recruiter | Admin | Description |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | `POST` | `/api/auth/register` | ✅ (Candidate only) | ❌ | ❌ | ❌ | Public self-service registration. Attempts to register as Recruiter or Admin are rejected with `403 Forbidden`. |
-| `POST` | `/api/auth/login` | ✅ | ✅ | ✅ | ✅ | Authenticate with email and password to receive a Bearer JWT. |
+| `POST` | `/api/auth/login` | ✅ | ✅ | ✅ | ✅ | Authenticate with email, password, and optional `role` ("Candidate", "Recruiter", "Admin") to receive a Bearer JWT. Mismatched roles return `403 Forbidden`. |
 | `GET` | `/api/auth/me` | ❌ | ✅ | ✅ | ✅ | Return current authenticated user profile. |
+| `GET` | `/api/auth/profile` | ❌ | ❌ (403) | ✅ | ✅ | Retrieve authenticated recruiter or admin profile details. |
+| `PUT` | `/api/auth/profile` | ❌ | ❌ (403) | ✅ | ✅ | Update authenticated recruiter or admin profile (`full_name`, `company_name`, `phone_number`). Audited as `update_profile`. |
+| `POST` | `/api/auth/change-password` | ❌ | ❌ (403) | ✅ | ✅ | Change authenticated recruiter or admin password with current password verification. Audited as `change_password`. |
 | `GET` | `/api/settings` | ✅ | ✅ | ✅ | ✅ | Public platform flags (`registration_open`, `feature_mock_interview`, etc.) and system maintenance banner. |
 | `GET` | `/docs`, `/openapi.json`, `/redoc` | ✅ | ✅ | ✅ | ✅ | OpenAPI documentation and Swagger UI. |
 

@@ -12,7 +12,7 @@ import threading
 from typing import Any, Dict, List, Optional
 import plotly.express as px
 import plotly.graph_objects as go
-from ui_common import _esc, format_error_detail
+from ui_common import _esc, format_error_detail, render_profile_page
 from services import hiring_score as hiring_score_engine
 from admin_dashboard import show_admin_dashboard
 
@@ -2971,6 +2971,11 @@ def show_recruiter_dashboard(token: str, user: dict):
             st.session_state["active_nav"] = "Resume Parser"
             st.rerun()
 
+        if st.button(f"{'▸ ' if current_nav == 'My Profile' else '  '}My Profile", key="nav_profile", use_container_width=True,
+                     type="primary" if current_nav == "My Profile" else "secondary"):
+            st.session_state["active_nav"] = "My Profile"
+            st.rerun()
+
         if st.button(f"{'▸ ' if current_nav == 'Settings' else '  '}Settings", key="nav_settings", use_container_width=True,
                      type="primary" if current_nav == "Settings" else "secondary"):
             st.session_state["active_nav"] = "Settings"
@@ -3016,6 +3021,8 @@ def show_recruiter_dashboard(token: str, user: dict):
         show_interview_assistant_view(jobs_list, candidates, token)
     elif current_nav == "Resume Parser":
         show_resume_parser_view(token)
+    elif current_nav == "My Profile":
+        render_profile_page(token, user, role_label="Recruiter")
     elif current_nav == "Settings":
         show_settings_view(user, candidates, jobs_list, token)
 
@@ -3540,6 +3547,15 @@ def show_login():
 
         st.markdown("<h3 style='font-size:16px;margin-bottom:14px;'>Sign in to your account</h3>", unsafe_allow_html=True)
 
+        selected_role = st.radio(
+            "Sign in as",
+            ["Candidate", "Recruiter", "Admin"],
+            index=0,
+            horizontal=True,
+            key="login_role",
+        )
+        st.caption("Recruiter and Admin accounts are created by an administrator.")
+
         email = st.text_input("Email or Account Name", placeholder="you@company.com or username", key="login_email")
         password = st.text_input("Password", type="password", key="login_password")
 
@@ -3560,7 +3576,7 @@ def show_login():
                 st.error("Please fill in all fields.")
             else:
                 with st.spinner("Signing in..."):
-                    res = api_request("POST", "/api/auth/login", json={"email": email.strip(), "password": password})
+                    res = api_request("POST", "/api/auth/login", json={"email": email.strip(), "password": password, "role": selected_role})
                 if isinstance(res, dict) and ("error" in res or "detail" in res):
                     st.error(format_error_detail(res.get("error") or res.get("detail")))
                 elif isinstance(res, dict) and "access_token" in res:
@@ -3616,7 +3632,9 @@ def show_register():
         full_name = st.text_input("Full Name *", placeholder="Jane Smith", key="reg_name")
         work_email = st.text_input("Email *", placeholder="jane@example.com", key="reg_email")
 
-        job_title = st.selectbox("Role / Account Type", ["Candidate"], key="reg_role", help="Recruiter and Admin accounts are provisioned by a platform administrator.")
+        st.text_input("Account Type", value="Candidate", disabled=True, key="reg_account_type_display")
+        st.caption("Recruiter and Admin accounts are created by an administrator.")
+        job_title = "Candidate"
         company_name = "Candidate"
 
         phone = st.text_input("Phone (Optional)", placeholder="+1 555 000 0000", key="reg_phone")

@@ -232,6 +232,7 @@ Frontend Dashboard will open at: `http://localhost:8501`
 │   ├── test_phase3_fixes.py        # Deduplication, acronym casing, 5-pillar scores, error formatting tests
 │   ├── test_recruitment_pipeline.py# 6-stage ATS pipeline lifecycle and transition tests
 │   ├── test_role_isolation.py      # Route matrix, cross-role 403 enforcement, and access_denied audit tests
+│   ├── test_role_login_and_profile.py # Role-checked login, profile management, password change, and admin provisioning tests
 │   ├── test_role_management.py     # Supported roles, registration role constraints, HR Manager retirement
 │   └── test_skill_gap_analysis.py  # Critical and secondary skill gap evaluation tests
 ├── resumes/                        # Sample resumes for testing and demonstration
@@ -242,7 +243,7 @@ Frontend Dashboard will open at: `http://localhost:8501`
 
 ## 🧪 Testing
 
-Run the full automated pytest test suite (**141 passing tests**):
+Run the full automated pytest test suite (**159 passing tests**):
 
 ```bash
 pytest tests/ -v

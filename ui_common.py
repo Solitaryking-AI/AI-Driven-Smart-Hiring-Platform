@@ -98,6 +98,7 @@ def render_svg(icon_name: str, size: int = 18, color: str = "currentColor") -> s
     icons = {
         "dashboard": '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
         "users": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+        "user": '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
         "briefcase": '<rect width="20" height="14" x="2" y="7" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>',
         "target": '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
         "chat": '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
@@ -176,4 +177,161 @@ def render_admin_topbar(breadcrumb: str, title: str, subtitle: str):
         <div class='sh-subtitle'>{s_esc}</div>
     </div>
     """, unsafe_allow_html=True)
+
+
+def render_profile_page(token: str, user: dict, role_label: str):
+    """
+    Render a clean, reactive profile management view for Recruiter and Admin roles.
+    Allows viewing immutable account attributes (email, role, created_at, last_login_at)
+    and modifying editable attributes (full_name, phone_number, company_name)
+    with auditing and optional password change accordion.
+    """
+    role_color = "#818cf8" if role_label.lower() == "admin" else "var(--primary)"
+
+    st.markdown(f"""
+    <div class='sh-page-header'>
+        <div class='sh-breadcrumb' style='margin-bottom:8px;'>
+            {render_svg('user', 14, role_color)}
+            <span>SmartHire AI</span>
+            <span>/</span>
+            <strong>My Profile</strong>
+        </div>
+        <h1 class='sh-title'>My Profile</h1>
+        <div class='sh-subtitle'>Manage your personal account details, organization, and security preferences.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 1. Fetch fresh profile data from backend
+    profile_data = api_request("GET", "/api/auth/profile", token=token)
+    if isinstance(profile_data, dict) and profile_data.get("__unauthorized"):
+        _handle_unauthorized(profile_data)
+        return
+    if isinstance(profile_data, dict) and ("error" in profile_data or "detail" in profile_data):
+        st.error(format_error_detail(profile_data.get("error") or profile_data.get("detail")))
+        return
+
+    # Use fetched profile or fallback to session user
+    p = profile_data if isinstance(profile_data, dict) and "email" in profile_data else user
+
+    # 2. Account Overview Card (Read-Only)
+    st.markdown("<h3 style='font-size:16px;margin-bottom:12px;'>Account Information</h3>", unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(f"""
+        <div class='sh-card-sm'>
+            <div style='font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;'>Email Address</div>
+            <div style='font-size:13px;font-weight:600;color:var(--text-primary);margin-top:4px;'>{_esc(p.get('email', '-'))}</div>
+            <div style='font-size:10px;color:var(--text-subtle);margin-top:2px;'>Read-only system identifier</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"""
+        <div class='sh-card-sm'>
+            <div style='font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;'>Assigned Role</div>
+            <div style='font-size:13px;font-weight:600;color:{role_color};margin-top:4px;'>{_esc(p.get('job_title', role_label))}</div>
+            <div style='font-size:10px;color:var(--text-subtle);margin-top:2px;'>Governed by Administrator</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c3:
+        created_str = str(p.get('created_at', '-'))[:10] if p.get('created_at') else '-'
+        st.markdown(f"""
+        <div class='sh-card-sm'>
+            <div style='font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;'>Account Created</div>
+            <div style='font-size:13px;font-weight:600;color:var(--text-primary);margin-top:4px;'>{_esc(created_str)}</div>
+            <div style='font-size:10px;color:var(--text-subtle);margin-top:2px;'>Registration timestamp</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c4:
+        login_str = str(p.get('last_login_at', '-'))[:16].replace('T', ' ') if p.get('last_login_at') else 'Active Session'
+        st.markdown(f"""
+        <div class='sh-card-sm'>
+            <div style='font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;'>Last Login</div>
+            <div style='font-size:13px;font-weight:600;color:var(--text-primary);margin-top:4px;'>{_esc(login_str)}</div>
+            <div style='font-size:10px;color:var(--text-subtle);margin-top:2px;'>UTC timestamp</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+
+    # 3. Editable Profile Form
+    st.markdown("<h3 style='font-size:16px;margin-bottom:12px;'>Edit Profile Details</h3>", unsafe_allow_html=True)
+    with st.form("form_edit_user_profile"):
+        f_col1, f_col2 = st.columns(2)
+        with f_col1:
+            full_name = st.text_input("Full Name *", value=p.get("full_name") or "", key="profile_edit_name")
+            company_name = st.text_input("Company / Organization *", value=p.get("company_name") or "", key="profile_edit_company")
+        with f_col2:
+            phone_number = st.text_input("Phone Number", value=p.get("phone_number") or "", placeholder="+1 (555) 000-0000", key="profile_edit_phone")
+            st.caption("Phone number accepts digits, spaces, and formatting characters (+ - ( )). Leave blank to remove.")
+
+        save_profile_btn = st.form_submit_button("Save Profile Changes", type="primary")
+
+        if save_profile_btn:
+            name_clean = full_name.strip()
+            comp_clean = company_name.strip()
+            phone_clean = phone_number.strip() if phone_number else ""
+
+            if not name_clean:
+                st.error("Full name cannot be blank.")
+            elif not comp_clean:
+                st.error("Company / Organization cannot be blank.")
+            else:
+                update_payload = {
+                    "full_name": name_clean,
+                    "company_name": comp_clean,
+                    "phone_number": phone_clean if phone_clean else None,
+                }
+                save_res = api_request("PUT", "/api/auth/profile", token=token, json=update_payload)
+                if isinstance(save_res, dict) and save_res.get("__unauthorized"):
+                    _handle_unauthorized(save_res)
+                    return
+                if isinstance(save_res, dict) and ("error" in save_res or "detail" in save_res):
+                    st.error(format_error_detail(save_res.get("error") or save_res.get("detail")))
+                elif isinstance(save_res, dict) and "user_id" in save_res:
+                    st.session_state["user"] = save_res
+                    st.toast("Profile updated successfully!", icon="✅")
+                    st.rerun()
+                else:
+                    st.error("Failed to update profile. Please try again.")
+
+    st.markdown("<div style='height:20px;'></div>", unsafe_allow_html=True)
+
+    # 4. Security: Change Password Accordion
+    with st.expander("Security Preferences: Change Password", expanded=False):
+        st.caption("Update your account password. Must be at least 8 characters long and no longer than 72 bytes.")
+        with st.form("form_change_user_password"):
+            curr_pass = st.text_input("Current Password *", type="password", key="profile_change_curr_pass")
+            p_col1, p_col2 = st.columns(2)
+            with p_col1:
+                new_pass = st.text_input("New Password *", type="password", key="profile_change_new_pass")
+            with p_col2:
+                conf_pass = st.text_input("Confirm New Password *", type="password", key="profile_change_conf_pass")
+
+            change_pass_btn = st.form_submit_button("Update Password", type="secondary")
+
+            if change_pass_btn:
+                if not curr_pass or not new_pass or not conf_pass:
+                    st.error("Please fill in all password fields.")
+                elif new_pass != conf_pass:
+                    st.error("New passwords do not match.")
+                elif len(new_pass.encode("utf-8")) > 72:
+                    st.error("Password cannot exceed 72 bytes.")
+                elif len(new_pass) < 8:
+                    st.error("Password must be at least 8 characters long.")
+                else:
+                    pwd_payload = {
+                        "current_password": curr_pass,
+                        "new_password": new_pass,
+                        "confirm_password": conf_pass,
+                    }
+                    pwd_res = api_request("POST", "/api/auth/change-password", token=token, json=pwd_payload)
+                    if isinstance(pwd_res, dict) and pwd_res.get("__unauthorized"):
+                        _handle_unauthorized(pwd_res)
+                        return
+                    if isinstance(pwd_res, dict) and ("error" in pwd_res or "detail" in pwd_res):
+                        st.error(format_error_detail(pwd_res.get("error") or pwd_res.get("detail")))
+                    else:
+                        st.success("✓ Password changed successfully.")
+                        st.toast("Password updated successfully!", icon="🔒")
+
 
