@@ -21,7 +21,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from database import SessionLocal, init_db
-from models import Candidate, Job
+from models import Application, Candidate, Job
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +142,12 @@ def seed_database(csv_path: str = "data/resume_data.csv", force: bool = False, b
 
         if force:
             if existing_seeded_candidates > 0:
-                print(f"[!] --force supplied: Removing {existing_seeded_candidates} previously seeded candidates...")
+                print(f"[!] --force supplied: Removing {existing_seeded_candidates} previously seeded candidates and applications...")
+                seeded_cand_ids = [
+                    cid for (cid,) in db.query(Candidate.candidate_id).filter(Candidate.resume_path.like("dataset_row_%")).all()
+                ]
+                if seeded_cand_ids:
+                    db.query(Application).filter(Application.candidate_id.in_(seeded_cand_ids)).delete(synchronize_session=False)
                 db.query(Candidate).filter(Candidate.resume_path.like("dataset_row_%")).delete(synchronize_session=False)
             if existing_seeded_jobs > 0:
                 print(f"[!] --force supplied: Removing {existing_seeded_jobs} matching dataset jobs...")
@@ -426,6 +431,11 @@ def seed_database(csv_path: str = "data/resume_data.csv", force: bool = False, b
             print(f"[+] Successfully saved ground-truth match scores to: {matched_scores_path}")
         else:
             print("[*] Candidate seeding skipped — existing data/matched_scores.json left untouched.")
+
+        # -------------------------------------------------------------------
+        # Ensure all seeded candidates have pipeline application records
+        # -------------------------------------------------------------------
+        init_db()
 
         # -------------------------------------------------------------------
         # Summary Report

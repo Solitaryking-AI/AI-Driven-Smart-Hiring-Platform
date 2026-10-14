@@ -20,6 +20,7 @@ smarthire.db
 # Uploaded files
 uploads/*
 !uploads/.gitkeep
+backups/
 
 # Environment & Secrets
 .env

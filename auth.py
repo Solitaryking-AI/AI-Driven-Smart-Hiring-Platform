@@ -45,7 +45,10 @@ import bcrypt as _bcrypt
 
 def hash_password(plain: str) -> str:
     """Return bcrypt hash of *plain* text password."""
-    return _bcrypt.hashpw(plain.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
+    raw = plain.encode("utf-8")
+    if len(raw) > 72:
+        raise ValueError("Password cannot exceed 72 bytes.")
+    return _bcrypt.hashpw(raw, _bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
