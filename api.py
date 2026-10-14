@@ -32,7 +32,7 @@ from schemas import (
     InterviewCandidateMessage,
     JobCreate, JobUpdate, JobResponse,
     UserCreate, UserLogin, UserResponse, Token, ProfileUpdate, PasswordChange,
-    CandidateProfileUpdate, CandidateProfileResponse,
+    CandidateProfileUpdate, CandidateProfileResponse, CandidateDashboardResponse,
     ResumeAnalysisRequest, ResumeAnalysisResponse,
     PracticeAnswerSubmit, PracticeAnswerResponse,
     CandidateMockInterviewStart,
@@ -2194,6 +2194,351 @@ def _candidate_to_profile_response(cand: Optional[Candidate], user: User) -> dic
         "resume_path": cand.resume_path if cand else None,
         "stage": cand.stage if cand else None,
         "created_at": cand.created_at if cand else user.created_at,
+    }
+
+
+@app.get("/api/candidate/dashboard-summary", response_model=CandidateDashboardResponse)
+def get_candidate_dashboard_summary(
+    user: User = Depends(require_candidate),
+    db: Session = Depends(get_db),
+):
+    # 1. Candidate lookup without creating junk rows
+    cand = db.query(Candidate).filter(Candidate.user_id == user.user_id).first()
+    if cand:
+        c_dict = _candidate_to_dict(cand)
+        skills_list = c_dict.get("skills") or []
+        exp_list = c_dict.get("experience") or []
+        edu_list = c_dict.get("education") or []
+        proj_list = c_dict.get("projects") or []
+        cert_list = c_dict.get("certifications") or []
+        resume_path = cand.resume_path
+        cand_id = cand.candidate_id
+    else:
+        c_dict = {
+            "name": user.full_name,
+            "email": user.email,
+            "phone": user.phone_number,
+            "skills": [],
+            "experience": [],
+            "education": [],
+            "projects": [],
+            "certifications": [],
+        }
+        skills_list = []
+        exp_list = []
+        edu_list = []
+        proj_list = []
+        cert_list = []
+        resume_path = None
+        cand_id = None
+
+    # 2. Profile Completeness
+    contact_score = 100 if (user.full_name or (cand and cand.name)) and (user.email or (cand and cand.email)) else 0
+    skills_score = 100 if len(skills_list) > 0 else 0
+    exp_score = 100 if len(exp_list) > 0 else 0
+    edu_score = 100 if len(edu_list) > 0 else 0
+    proj_score = 100 if len(proj_list) > 0 else 0
+    cert_score = 100 if len(cert_list) > 0 else 0
+    resume_score = 100 if resume_path else 0
+
+    breakdown_dict = {
+        "contact": contact_score,
+        "skills": skills_score,
+        "experience": exp_score,
+        "education": edu_score,
+        "projects": proj_score,
+        "certifications": cert_score,
+        "resume_uploaded": resume_score,
+    }
+    missing_items = []
+    if not resume_score:
+        missing_items.append("Resume Document")
+    if not skills_score:
+        missing_items.append("Technical Skills")
+    if not exp_score:
+        missing_items.append("Work Experience")
+    if not edu_score:
+        missing_items.append("Education History")
+    if not proj_score:
+        missing_items.append("Key Projects")
+    if not cert_score:
+        missing_items.append("Certifications")
+
+    comp_score = int(round(sum(breakdown_dict.values()) / len(breakdown_dict)))
+    profile_completeness = {
+        "score": comp_score,
+        "breakdown": breakdown_dict,
+        "missing": missing_items,
+    }
+
+    # 3. Skills Summary
+    skills_summary = {
+        "total": len(skills_list),
+        "top_skills": skills_list[:10],
+    }
+
+    # 4. ATS Resume Intelligence Summary
+    analyses = (
+        db.query(ResumeAnalysis)
+        .filter(ResumeAnalysis.user_id == user.user_id)
+        .order_by(ResumeAnalysis.created_at.desc())
+        .limit(10)
+        .all()
+    )
+    ats_history = []
+    latest_ats_score = None
+    ats_strengths = []
+    ats_improvements = []
+
+    for idx, a in enumerate(analyses):
+        a_data = {}
+        if a.analysis_data:
+            try:
+                a_data = json.loads(a.analysis_data)
+            except Exception:
+                a_data = {}
+        ats_fb = a_data.get("ats_feedback") or {}
+        score_val = ats_fb.get("ats_score")
+        if score_val is None:
+            score_val = a_data.get("ats_score")
+
+        if isinstance(score_val, (int, float)):
+            int_score = int(round(score_val))
+            if idx == 0:
+                latest_ats_score = int_score
+            date_str = a.created_at.strftime("%Y-%m-%d") if a.created_at else ""
+            ats_history.append({"date": date_str, "score": int_score})
+
+        if idx == 0:
+            if isinstance(a_data.get("strengths"), list):
+                ats_strengths = [str(s) for s in a_data["strengths"][:5]]
+            if isinstance(a_data.get("improvement_areas"), list):
+                ats_improvements = [str(s) for s in a_data["improvement_areas"][:5]]
+
+    ats_summary = {
+        "latest_score": latest_ats_score,
+        "history": ats_history,
+        "strengths": ats_strengths,
+        "improvement_areas": ats_improvements,
+    }
+
+    # 5. Practice Answers Summary
+    practice_rows = (
+        db.query(PracticeAnswer)
+        .filter(PracticeAnswer.user_id == user.user_id)
+        .order_by(PracticeAnswer.created_at.asc())
+        .all()
+    )
+    practice_scores = []
+    practice_by_type = {}
+    practice_trend = []
+
+    for pa in practice_rows:
+        fb = {}
+        if pa.feedback:
+            try:
+                fb = json.loads(pa.feedback)
+            except Exception:
+                fb = {}
+        sc = fb.get("score")
+        if isinstance(sc, (int, float)):
+            float_sc = float(sc)
+            practice_scores.append(float_sc)
+            dt_str = pa.created_at.strftime("%Y-%m-%d") if pa.created_at else ""
+            practice_trend.append({"date": dt_str, "score": round(float_sc, 1)})
+            q_type = pa.question_type or "Technical"
+            practice_by_type.setdefault(q_type, []).append(float_sc)
+
+    avg_practice = (
+        round(sum(practice_scores) / len(practice_scores), 1)
+        if practice_scores
+        else None
+    )
+    by_type_avg = {
+        k: round(sum(v) / len(v), 1) for k, v in practice_by_type.items() if v
+    }
+    practice_summary = {
+        "attempts": len(practice_rows),
+        "avg_score": avg_practice,
+        "trend": practice_trend[-20:],  # last 20, oldest first
+        "by_type": by_type_avg,
+    }
+
+    # 6. Mock Interview Summary
+    session_query = (
+        db.query(InterviewSession)
+        .filter(
+            or_(
+                InterviewSession.created_by == user.user_id,
+                InterviewSession.candidate_id == (cand_id or -1),
+            )
+        )
+        .order_by(InterviewSession.updated_at.desc())
+        .all()
+    )
+    total_sessions = len(session_query)
+    completed_sessions = [s for s in session_query if s.status == "completed"]
+
+    mock_job_ids = {s.job_id for s in session_query if s.job_id}
+    job_map = (
+        {
+            j.job_id: j.title
+            for j in db.query(Job.job_id, Job.title)
+            .filter(Job.job_id.in_(mock_job_ids))
+            .all()
+        }
+        if mock_job_ids
+        else {}
+    )
+
+    mock_history = []
+    for s in session_query[:10]:
+        fb = {}
+        if s.feedback:
+            try:
+                fb = json.loads(s.feedback)
+            except Exception:
+                fb = {}
+        ov_sc = fb.get("overall_score")
+        verdict = fb.get("verdict")
+        float_ov = float(ov_sc) if isinstance(ov_sc, (int, float)) else None
+        mock_history.append({
+            "session_id": s.session_id,
+            "date": s.created_at.strftime("%Y-%m-%d") if s.created_at else "",
+            "job_title": job_map.get(s.job_id, "General Interview"),
+            "overall_score": round(float_ov, 1) if float_ov is not None else None,
+            "verdict": verdict or s.status.capitalize(),
+        })
+
+    completed_scores = []
+    latest_competencies = None
+    for s in completed_sessions:
+        if s.feedback:
+            try:
+                fb = json.loads(s.feedback)
+            except Exception:
+                fb = {}
+            ov = fb.get("overall_score")
+            if isinstance(ov, (int, float)):
+                completed_scores.append(float(ov))
+            if latest_competencies is None and fb.get("competency_scores"):
+                comps = fb.get("competency_scores")
+                if isinstance(comps, dict):
+                    latest_competencies = {
+                        str(k): round(float(v), 1)
+                        for k, v in comps.items()
+                        if isinstance(v, (int, float))
+                    }
+
+    avg_mock = (
+        round(sum(completed_scores) / len(completed_scores), 1)
+        if completed_scores
+        else None
+    )
+    mock_summary = {
+        "total": total_sessions,
+        "completed": len(completed_sessions),
+        "avg_overall": avg_mock,
+        "latest_competencies": latest_competencies,
+        "history": mock_history,
+    }
+
+    # 7. Job Fit (Open Jobs, up to 6, sorted desc by final_score)
+    open_jobs = db.query(Job).filter(Job.status == "open").all()
+    job_fit_list = []
+    for j in open_jobs:
+        j_dict = _job_to_dict(j)
+        score_res = matching_engine.score_candidate(c_dict, j_dict)
+        job_fit_list.append({
+            "job_id": j.job_id,
+            "title": j.title,
+            "department": j.department or "General",
+            "fit_percent": round(float(score_res.get("final_score", 0.0)), 1),
+            "matched": score_res.get("matched_required", []),
+            "missing": score_res.get("missing_required", []),
+        })
+    job_fit_list.sort(key=lambda x: x["fit_percent"], reverse=True)
+    job_fit_top6 = job_fit_list[:6]
+
+    # 8. Activity Timeline (newest first, max 10)
+    timeline_items = []
+    for pa in practice_rows:
+        if pa.created_at:
+            timeline_items.append({
+                "dt": pa.created_at,
+                "date": pa.created_at.strftime("%Y-%m-%d %H:%M"),
+                "type": "practice",
+                "label": f"Completed {pa.question_type or 'Interview'} Practice Question",
+            })
+    for s in session_query:
+        ts = s.updated_at or s.created_at
+        if ts:
+            j_name = job_map.get(s.job_id, "Mock Interview")
+            timeline_items.append({
+                "dt": ts,
+                "date": ts.strftime("%Y-%m-%d %H:%M"),
+                "type": "mock",
+                "label": f"AI Mock Interview ({j_name}) - {s.status.capitalize()}",
+            })
+    for a in analyses:
+        if a.created_at:
+            timeline_items.append({
+                "dt": a.created_at,
+                "date": a.created_at.strftime("%Y-%m-%d %H:%M"),
+                "type": "ats",
+                "label": "AI Resume Intelligence & ATS Screening Run",
+            })
+    if cand and cand.created_at:
+        timeline_items.append({
+            "dt": cand.created_at,
+            "date": cand.created_at.strftime("%Y-%m-%d %H:%M"),
+            "type": "profile",
+            "label": "Candidate Career Profile Initialized",
+        })
+
+    # Sort descending by timestamp
+    timeline_items.sort(
+        key=lambda x: x["dt"].timestamp() if hasattr(x["dt"], "timestamp") else 0,
+        reverse=True,
+    )
+    activity_top10 = [
+        {"date": item["date"], "type": item["type"], "label": item["label"]}
+        for item in timeline_items[:10]
+    ]
+
+    # 9. Feature Flags
+    feature_flags = {
+        "resume_ai": str(settings_store.get_setting(db, "feature_resume_ai", "true")).lower() != "false",
+        "practice": str(settings_store.get_setting(db, "feature_practice", "true")).lower() != "false",
+        "mock_interview": str(settings_store.get_setting(db, "feature_mock_interview", "true")).lower() != "false",
+        "voice": str(settings_store.get_setting(db, "feature_voice", "true")).lower() != "false",
+    }
+
+    # 10. Next Steps (Rule-based deterministic suggestions, max 4)
+    steps = []
+    if not resume_path:
+        steps.append("Upload your resume (PDF/DOCX) to parse credentials and unlock ATS score diagnostics.")
+    if len(skills_list) < 3:
+        steps.append("Add key technical skills to your profile to improve semantic job match alignment.")
+    if len(practice_rows) == 0:
+        steps.append("Complete your first practice question assessment to evaluate your STAR methodology.")
+    if len(completed_sessions) == 0:
+        steps.append("Launch an interactive AI mock interview room session to practice role-specific answers.")
+    if ats_improvements and len(steps) < 4:
+        steps.append(f"Target resume improvement: {ats_improvements[0]}")
+    if len(steps) < 4 and len(proj_list) == 0:
+        steps.append("Highlight notable engineering projects on your profile to stand out to hiring teams.")
+
+    return {
+        "profile_completeness": profile_completeness,
+        "skills": skills_summary,
+        "ats": ats_summary,
+        "practice": practice_summary,
+        "mock_interviews": mock_summary,
+        "job_fit": job_fit_top6,
+        "activity": activity_top10,
+        "feature_flags": feature_flags,
+        "next_steps": steps[:4],
     }
 
 

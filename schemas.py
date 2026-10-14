@@ -1,7 +1,7 @@
 import json
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Literal
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
@@ -918,5 +918,105 @@ class PlatformSettingsResponse(BaseModel):
 
 class PlatformSettingsUpdate(BaseModel):
     settings: Dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# Candidate Graphical Dashboard Schemas
+# ---------------------------------------------------------------------------
+
+class ProfileCompletenessBreakdown(BaseModel):
+    contact: int = 0
+    skills: int = 0
+    experience: int = 0
+    education: int = 0
+    projects: int = 0
+    certifications: int = 0
+    resume_uploaded: int = 0
+
+
+class ProfileCompleteness(BaseModel):
+    score: int = 0
+    breakdown: ProfileCompletenessBreakdown
+    missing: List[str] = []
+
+
+class SkillsSummary(BaseModel):
+    total: int = 0
+    top_skills: List[str] = []
+
+
+class AtsHistoryItem(BaseModel):
+    date: str
+    score: int
+
+
+class AtsSummary(BaseModel):
+    latest_score: Optional[int] = None
+    history: List[AtsHistoryItem] = []
+    strengths: List[str] = []
+    improvement_areas: List[str] = []
+
+
+class PracticeTrendItem(BaseModel):
+    date: str
+    score: float
+
+
+class PracticeSummary(BaseModel):
+    attempts: int = 0
+    avg_score: Optional[float] = None
+    trend: List[PracticeTrendItem] = []
+    by_type: Dict[str, float] = {}
+
+
+class MockHistoryItem(BaseModel):
+    session_id: int
+    date: str
+    job_title: str
+    overall_score: Optional[float] = None
+    verdict: Optional[str] = None
+
+
+class MockSummary(BaseModel):
+    total: int = 0
+    completed: int = 0
+    avg_overall: Optional[float] = None
+    latest_competencies: Optional[Dict[str, float]] = None
+    history: List[MockHistoryItem] = []
+
+
+class JobFitItem(BaseModel):
+    job_id: int
+    title: str
+    department: str
+    fit_percent: float
+    matched: List[str] = []
+    missing: List[str] = []
+
+
+class CandidateActivityItem(BaseModel):
+    date: str
+    type: Literal["practice", "mock", "ats", "profile"]
+    label: str
+
+
+class CandidateFeatureFlags(BaseModel):
+    resume_ai: bool = True
+    practice: bool = True
+    mock_interview: bool = True
+    voice: bool = True
+
+
+class CandidateDashboardResponse(BaseModel):
+    profile_completeness: ProfileCompleteness
+    skills: SkillsSummary
+    ats: AtsSummary
+    practice: PracticeSummary
+    mock_interviews: MockSummary
+    job_fit: List[JobFitItem] = []
+    activity: List[CandidateActivityItem] = []
+    feature_flags: CandidateFeatureFlags
+    next_steps: List[str] = []
+
 
 

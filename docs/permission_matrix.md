@@ -79,6 +79,7 @@ This document defines the strict role separation and authorization boundaries im
 | `POST` | `/api/candidate/mock-interview/{session_id}/complete` | ✅ | ❌ (403) | ❌ (403) | End mock interview, calculate overall score, and generate comprehensive evaluation. |
 | `GET` | `/api/candidate/mock-interviews` | ✅ | ❌ (403) | ❌ (403) | List all past mock interview sessions belonging to the caller. |
 | `GET` | `/api/candidate/mock-interviews/{session_id}` | ✅ | ❌ (403) | ❌ (403) | Retrieve full transcript, competency breakdown, and report for specific mock session. |
+| `GET` | `/api/candidate/dashboard-summary` | ✅ | ❌ (403) | ❌ (403) | Aggregate career telemetry for candidate dashboard (readiness gauge, completeness breakdown, ATS trajectory, practice trends, competency radar, requisition fit, activity timeline). |
 
 ---
 

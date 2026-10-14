@@ -47,6 +47,16 @@ An intelligent, full-stack recruitment copilot, candidate career hub, and admini
   - End-of-interview evaluation report with overall score (0-100), hiring verdict, and competency breakdown.
 - **Interview History & Performance Reports**:
   - Full archive of past mock interviews, transcripts, competency scores, and actionable roadmaps.
+- **Interactive Career Readiness Dashboard (`candidate_dashboard.py`)**:
+  - **Career Readiness Score Gauge**: Composite readiness index combining portfolio completeness (35%), ATS optimization (30%), practice score (20%), and mock interview performance (15%) with dynamic weight renormalization.
+  - **KPI Metric Strip**: Real-time status cards for Profile Completeness, ATS Resume Score, Practice Average, Completed Mocks, and Verified Skills.
+  - **Profile Completeness Breakdown**: Progress bar by dimension (Personal Info, Skills, Experience, Education, Projects, Resume File) with visual badges for missing sections.
+  - **Interview Competency Radar**: Multi-axis radar chart mapping competencies (Communication, Problem Solving, Technical Acumen, etc.) from candidate mock interviews.
+  - **Practice Trend & Question Type Distribution**: Historical line chart of practice attempts and interactive bar chart breaking down performance across Technical, Behavioral, and Scenario questions.
+  - **ATS Score Trajectory & Improvement Highlights**: Area chart tracking resume iteration scores over time with contextual strengths and deficit chips.
+  - **Open Requisition Fit Ranking**: Real-time candidate fit score against open jobs with matched skill tags and missing skill badges.
+  - **Chronological Activity Timeline & Actionable Next Steps**: Step-by-step guidance checklist and audit trail of recent activities.
+  - **Sub-30s Client Caching & Fast Aggregations**: Non-blocking `GET /api/candidate/dashboard-summary` endpoint completing in <50ms with zero LLM latency.
 
 ### Platform Administration & System Governance Control Plane (Admin Only)
 - **Dedicated Admin Control Plane (`admin_dashboard.py`)**:
@@ -199,6 +209,7 @@ Frontend Dashboard will open at: `http://localhost:8501`
 ├── api.py                          # FastAPI application, public & recruiter endpoints, error handlers
 ├── app.py                          # Streamlit UI orchestrator (Recruiter ATS & Candidate Portal)
 ├── auth.py                         # JWT token issuance, verification, and bcrypt hashing
+├── candidate_dashboard.py          # Standalone graphical dashboard for Candidate Portal
 ├── database.py                     # SQLAlchemy session, engine, and non-destructive migrations
 ├── file_loader.py                  # Multi-format document loader (.pdf, .docx, .txt)
 ├── models.py                       # SQLAlchemy models (User, Candidate, Job, AuditLog, LlmUsage, Settings)
@@ -221,6 +232,7 @@ Frontend Dashboard will open at: `http://localhost:8501`
 ├── tests/
 │   ├── test_admin_dashboard.py     # Admin API security, user governance, purge, restore, audit tests
 │   ├── test_analytics.py           # Dashboard analytics & metric aggregation tests
+│   ├── test_candidate_dashboard.py # Candidate graphical dashboard aggregations, auth & data isolation tests
 │   ├── test_candidate_portal.py    # Candidate authentication, profile isolation, and mock room tests
 │   ├── test_data_layer_phase1.py   # Soft delete, audit logging, telemetry, and settings store tests
 │   ├── test_hiring_score.py        # Candidate scoring formula tests
@@ -243,7 +255,7 @@ Frontend Dashboard will open at: `http://localhost:8501`
 
 ## 🧪 Testing
 
-Run the full automated pytest test suite (**159 passing tests**):
+Run the full automated pytest test suite (**165 passing tests**):
 
 ```bash
 pytest tests/ -v

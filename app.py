@@ -15,6 +15,7 @@ import plotly.graph_objects as go
 from ui_common import _esc, format_error_detail, render_profile_page
 from services import hiring_score as hiring_score_engine
 from admin_dashboard import show_admin_dashboard
+from candidate_dashboard import show_candidate_overview_dashboard
 
 
 # ---------------------------------------------------------------------------
@@ -3123,87 +3124,91 @@ def show_candidate_dashboard(token: str, user: dict):
     has_resume = bool(candidate_profile.get("resume_path"))
 
     if nav_choice == "Overview & Profile":
-        render_recruiter_topbar("Candidate / Hub", "Candidate Profile & Career Hub", "Manage your technical portfolio, credentials, and career materials.")
+        tab_dash, tab_edit = st.tabs(["📊 Career Dashboard", "👤 Edit Profile & Credentials"])
+        with tab_dash:
+            show_candidate_overview_dashboard(token, user, candidate_profile)
+        with tab_edit:
+            render_recruiter_topbar("Candidate / Hub", "Candidate Profile & Career Hub", "Manage your technical portfolio, credentials, and career materials.")
 
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.markdown(f"""
-            <div class='sh-stat-card'>
-                <div class='sh-stat-label'>Resume Status</div>
-                <div class='sh-stat-value' style='color:{'#10B981' if has_resume else '#F59E0B'};font-size:20px;'>{'Uploaded' if has_resume else 'Pending'}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with c2:
-            st.markdown(f"""
-            <div class='sh-stat-card'>
-                <div class='sh-stat-label'>Identified Skills</div>
-                <div class='sh-stat-value' style='font-size:20px;'>{len(skills_list)}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with c3:
-            st.markdown(f"""
-            <div class='sh-stat-card'>
-                <div class='sh-stat-label'>Experience Roles</div>
-                <div class='sh-stat-value' style='font-size:20px;'>{len(exp_list)}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with c4:
-            st.markdown(f"""
-            <div class='sh-stat-card'>
-                <div class='sh-stat-label'>Projects</div>
-                <div class='sh-stat-value' style='font-size:20px;'>{len(proj_list)}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.markdown(f"""
+                <div class='sh-stat-card'>
+                    <div class='sh-stat-label'>Resume Status</div>
+                    <div class='sh-stat-value' style='color:{'#10B981' if has_resume else '#F59E0B'};font-size:20px;'>{'Uploaded' if has_resume else 'Pending'}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with c2:
+                st.markdown(f"""
+                <div class='sh-stat-card'>
+                    <div class='sh-stat-label'>Identified Skills</div>
+                    <div class='sh-stat-value' style='font-size:20px;'>{len(skills_list)}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with c3:
+                st.markdown(f"""
+                <div class='sh-stat-card'>
+                    <div class='sh-stat-label'>Experience Roles</div>
+                    <div class='sh-stat-value' style='font-size:20px;'>{len(exp_list)}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with c4:
+                st.markdown(f"""
+                <div class='sh-stat-card'>
+                    <div class='sh-stat-label'>Projects</div>
+                    <div class='sh-stat-value' style='font-size:20px;'>{len(proj_list)}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
-        st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
-        col_l, col_r = st.columns([1.3, 1])
-        with col_l:
-            st.markdown("<h3 style='font-size:16px;margin-bottom:8px;'>Edit Profile Details</h3>", unsafe_allow_html=True)
+            st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+            col_l, col_r = st.columns([1.3, 1])
+            with col_l:
+                st.markdown("<h3 style='font-size:16px;margin-bottom:8px;'>Edit Profile Details</h3>", unsafe_allow_html=True)
 
-            p_name = st.text_input("Full Name", value=candidate_profile.get("name") or user_name, key="cp_name")
-            p_email = st.text_input("Email", value=candidate_profile.get("email") or user_email, key="cp_email")
-            p_phone = st.text_input("Phone", value=candidate_profile.get("phone") or "", placeholder="+1 555 000 0000", key="cp_phone")
-            p_skills = st.text_input("Technical Skills (Comma-separated)", value=", ".join(skills_list), placeholder="e.g. Python, SQL, Docker, React", key="cp_skills")
+                p_name = st.text_input("Full Name", value=candidate_profile.get("name") or user_name, key="cp_name")
+                p_email = st.text_input("Email", value=candidate_profile.get("email") or user_email, key="cp_email")
+                p_phone = st.text_input("Phone", value=candidate_profile.get("phone") or "", placeholder="+1 555 000 0000", key="cp_phone")
+                p_skills = st.text_input("Technical Skills (Comma-separated)", value=", ".join(skills_list), placeholder="e.g. Python, SQL, Docker, React", key="cp_skills")
 
-            if st.button("Save Profile Changes", type="primary", use_container_width=True):
-                update_payload = {
-                    "name": p_name.strip(),
-                    "email": p_email.strip(),
-                    "phone": p_phone.strip() or None,
-                    "skills": [s.strip() for s in p_skills.split(",") if s.strip()],
-                    "experience": exp_list,
-                    "education": edu_list,
-                    "projects": proj_list,
-                }
-                save_res = api_request("PUT", "/api/candidate/profile", token=token, json=update_payload)
-                _handle_unauthorized(save_res)
-                if "error" in save_res:
-                    st.error(save_res["error"])
-                else:
-                    st.success("Profile updated!")
-                    st.rerun()
+                if st.button("Save Profile Changes", type="primary", use_container_width=True):
+                    update_payload = {
+                        "name": p_name.strip(),
+                        "email": p_email.strip(),
+                        "phone": p_phone.strip() or None,
+                        "skills": [s.strip() for s in p_skills.split(",") if s.strip()],
+                        "experience": exp_list,
+                        "education": edu_list,
+                        "projects": proj_list,
+                    }
+                    save_res = api_request("PUT", "/api/candidate/profile", token=token, json=update_payload)
+                    _handle_unauthorized(save_res)
+                    if "error" in save_res:
+                        st.error(save_res["error"])
+                    else:
+                        st.success("Profile updated!")
+                        st.rerun()
 
-        with col_r:
-            st.markdown("<h3 style='font-size:16px;margin-bottom:8px;'>Parsed Work History & Credentials</h3>", unsafe_allow_html=True)
-            st.caption("Extracted automatically from your uploaded resume.")
+            with col_r:
+                st.markdown("<h3 style='font-size:16px;margin-bottom:8px;'>Parsed Work History & Credentials</h3>", unsafe_allow_html=True)
+                st.caption("Extracted automatically from your uploaded resume.")
 
-            if exp_list:
-                st.markdown("<div style='font-size:12px;font-weight:600;color:var(--text-subtle);margin-top:8px;'>WORK EXPERIENCE</div>", unsafe_allow_html=True)
-                for exp in exp_list[:4]:
-                    txt = exp.get("raw") if isinstance(exp, dict) else str(exp)
-                    st.markdown(f"<div style='font-size:13px;padding:3px 0;'>• {txt}</div>", unsafe_allow_html=True)
+                if exp_list:
+                    st.markdown("<div style='font-size:12px;font-weight:600;color:var(--text-subtle);margin-top:8px;'>WORK EXPERIENCE</div>", unsafe_allow_html=True)
+                    for exp in exp_list[:4]:
+                        txt = exp.get("raw") if isinstance(exp, dict) else str(exp)
+                        st.markdown(f"<div style='font-size:13px;padding:3px 0;'>• {txt}</div>", unsafe_allow_html=True)
 
-            if edu_list:
-                st.markdown("<div style='font-size:12px;font-weight:600;color:var(--text-subtle);margin-top:12px;'>EDUCATION</div>", unsafe_allow_html=True)
-                for edu in edu_list[:3]:
-                    txt = edu.get("raw") if isinstance(edu, dict) else str(edu)
-                    st.markdown(f"<div style='font-size:13px;padding:3px 0;'>🎓 {txt}</div>", unsafe_allow_html=True)
+                if edu_list:
+                    st.markdown("<div style='font-size:12px;font-weight:600;color:var(--text-subtle);margin-top:12px;'>EDUCATION</div>", unsafe_allow_html=True)
+                    for edu in edu_list[:3]:
+                        txt = edu.get("raw") if isinstance(edu, dict) else str(edu)
+                        st.markdown(f"<div style='font-size:13px;padding:3px 0;'>🎓 {txt}</div>", unsafe_allow_html=True)
 
-            if proj_list:
-                st.markdown("<div style='font-size:12px;font-weight:600;color:var(--text-subtle);margin-top:12px;'>PROJECTS</div>", unsafe_allow_html=True)
-                for proj in proj_list[:3]:
-                    txt = proj.get("raw") if isinstance(proj, dict) else str(proj)
-                    st.markdown(f"<div style='font-size:13px;padding:3px 0;'>💼 {txt}</div>", unsafe_allow_html=True)
+                if proj_list:
+                    st.markdown("<div style='font-size:12px;font-weight:600;color:var(--text-subtle);margin-top:12px;'>PROJECTS</div>", unsafe_allow_html=True)
+                    for proj in proj_list[:3]:
+                        txt = proj.get("raw") if isinstance(proj, dict) else str(proj)
+                        st.markdown(f"<div style='font-size:13px;padding:3px 0;'>💼 {txt}</div>", unsafe_allow_html=True)
 
     elif nav_choice == "Resume Intelligence & ATS":
         render_recruiter_topbar("Candidate / ATS", "AI Resume Intelligence & ATS Screening", "Upload your resume for deep AI parsing, ATS optimization scoring, and role alignment.")
