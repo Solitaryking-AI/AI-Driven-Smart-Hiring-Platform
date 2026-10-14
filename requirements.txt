@@ -12,7 +12,7 @@ python-multipart==0.0.32
 sqlalchemy==2.0.52
 
 # Frontend
-streamlit>=1.60.0
+streamlit==1.60.0
 plotly==7.0.0
 
 # NLP & Parsing
@@ -29,6 +29,7 @@ requests==2.34.2
 pillow==12.3.0
 
 # Auth
+bcrypt==4.2.1
 passlib[bcrypt]>=1.7.4
 python-jose[cryptography]>=3.3.0
 email-validator>=2.0.0
