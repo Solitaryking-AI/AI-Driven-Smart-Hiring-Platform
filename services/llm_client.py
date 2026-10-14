@@ -150,25 +150,84 @@ def get_client():
     return None
 
 
-def call_llm(system_prompt: str, messages: list, max_tokens: int = 1024, model: Optional[str] = None) -> str:
+def call_llm(
+    system_prompt: str,
+    messages: list,
+    max_tokens: int = 1024,
+    model: Optional[str] = None,
+    feature: str = "unknown",
+    user_id: Optional[int] = None,
+) -> str:
     """
     Unified entrypoint for LLM completions.
     Supports Sarvam AI (primary) and Anthropic Claude.
+    Records LlmUsage telemetry on every call.
     Raises RuntimeError on API failure or missing keys so callers return HTTP 502.
     """
+    import time
+    from database import SessionLocal
+    from models import LlmUsage
+
     _load_env_file()
 
-    sarvam_key = (
-        os.environ.get("SARVAM_API_KEY", "").strip()
-        or os.environ.get("SARVAMAI_API_KEY", "").strip()
+    t0 = time.time()
+    input_chars = len(system_prompt or "") + sum(
+        len(m.get("content", "") or "") if isinstance(m, dict) else len(str(m))
+        for m in (messages or [])
     )
-    if sarvam_key and not sarvam_key.startswith("your_"):
-        return _call_sarvam(sarvam_key, system_prompt, messages, max_tokens=max_tokens, model=model)
+    provider = "unknown"
+    chosen_model = model
+    output_chars = 0
+    success = False
+    err_str = None
+    result = None
 
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if anthropic_key and not anthropic_key.startswith("your_"):
-        return _call_anthropic(anthropic_key, system_prompt, messages, max_tokens=max_tokens, model=model)
+    try:
+        sarvam_key = (
+            os.environ.get("SARVAM_API_KEY", "").strip()
+            or os.environ.get("SARVAMAI_API_KEY", "").strip()
+        )
+        if sarvam_key and not sarvam_key.startswith("your_"):
+            provider = "sarvam"
+            chosen_model = chosen_model or os.environ.get("SARVAM_MODEL") or DEFAULT_SARVAM_MODEL
+            result = _call_sarvam(sarvam_key, system_prompt, messages, max_tokens=max_tokens, model=model)
+            output_chars = len(result or "")
+            success = True
+            return result
 
-    raise RuntimeError(
-        "No AI API key found. Please set SARVAM_API_KEY in your .env file."
-    )
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if anthropic_key and not anthropic_key.startswith("your_"):
+            provider = "anthropic"
+            chosen_model = chosen_model or DEFAULT_ANTHROPIC_MODEL
+            result = _call_anthropic(anthropic_key, system_prompt, messages, max_tokens=max_tokens, model=model)
+            output_chars = len(result or "")
+            success = True
+            return result
+
+        provider = "none"
+        err_str = "No AI API key found. Please set SARVAM_API_KEY in your .env file."
+        raise RuntimeError(err_str)
+    except Exception as e:
+        success = False
+        err_str = str(e)
+        raise
+    finally:
+        latency_ms = int((time.time() - t0) * 1000)
+        try:
+            db = SessionLocal()
+            usage_rec = LlmUsage(
+                user_id=user_id,
+                feature=feature or "unknown",
+                provider=provider,
+                model=chosen_model,
+                latency_ms=latency_ms,
+                success=success,
+                error=err_str if not success else None,
+                input_chars=input_chars,
+                output_chars=output_chars,
+            )
+            db.add(usage_rec)
+            db.commit()
+            db.close()
+        except Exception:
+            pass

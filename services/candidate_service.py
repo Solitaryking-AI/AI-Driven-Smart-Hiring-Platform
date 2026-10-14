@@ -158,6 +158,7 @@ def generate_resume_analysis(
             system_prompt=RESUME_ANALYSIS_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt_user}],
             max_tokens=1024,
+            feature="resume_analysis",
         )
         data = _extract_json_object(raw)
         return data
@@ -255,6 +256,7 @@ def evaluate_practice_answer(
             system_prompt=PRACTICE_EVALUATION_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt_user}],
             max_tokens=800,
+            feature="practice_evaluation",
         )
         return _extract_json_object(raw)
     except Exception:
@@ -332,6 +334,7 @@ def evaluate_mock_interview(
             system_prompt=MOCK_INTERVIEW_EVALUATION_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt_user}],
             max_tokens=1024,
+            feature="mock_interview_evaluation",
         )
         return _extract_json_object(raw)
     except Exception:

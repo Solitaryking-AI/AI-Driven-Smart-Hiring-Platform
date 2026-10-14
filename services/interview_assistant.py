@@ -102,6 +102,7 @@ def generate_interview_questions(
         system_prompt=QUESTION_GEN_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
         max_tokens=max_tokens,
+        feature="interview_questions",
     )
 
     try:
@@ -195,6 +196,7 @@ def generate_practice_questions(
         system_prompt=PRACTICE_QUESTION_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
         max_tokens=max_tokens,
+        feature="practice_questions",
     )
 
     try:
@@ -281,6 +283,11 @@ def get_interview_response(
     ]
     if not llm_messages:
         llm_messages = [{"role": "user", "content": "[Begin the interview now.]"}]
-    return call_llm(system_prompt=system_prompt, messages=llm_messages, max_tokens=300)
+    return call_llm(
+        system_prompt=system_prompt,
+        messages=llm_messages,
+        max_tokens=300,
+        feature="live_interview_dialogue",
+    )
 
 
