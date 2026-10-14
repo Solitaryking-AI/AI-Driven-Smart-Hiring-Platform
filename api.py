@@ -5,7 +5,7 @@ import uvicorn
 from collections import Counter
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
-from typing import List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal
 
 import pandas as pd
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Query, status
@@ -18,7 +18,12 @@ from pydantic import BaseModel, ValidationError
 from docx import Document
 
 from database import engine, get_db, init_db
-from models import Candidate, User, Job, InterviewSession, ResumeAnalysis, PracticeAnswer
+from models import (
+    Candidate, User, Job, InterviewSession, ResumeAnalysis, PracticeAnswer, Application,
+    AuditLog, LlmUsage, PlatformSetting,
+)
+
+init_db()
 from schemas import (
     CandidateCreate, CandidateResponse, CandidateListResponse,
     SkillFrequency, AnalyticsSummary, MatchResult, MatchBreakdown, HiringScoreBreakdown,
@@ -31,9 +36,12 @@ from schemas import (
     ResumeAnalysisRequest, ResumeAnalysisResponse,
     PracticeAnswerSubmit, PracticeAnswerResponse,
     CandidateMockInterviewStart,
+    VALID_PIPELINE_STAGES, ApplicationStageUpdate, ApplicationNotesUpdate, ApplicationCreate,
+    CandidateAddPipeline, ApplicationCardResponse, PipelineBoardResponse, CandidatePipelineDetailResponse,
 )
 from auth import hash_password, verify_password, create_access_token, decode_access_token
-from services import matching_engine, hiring_score, skill_gap_analysis, interview_assistant, candidate_service
+from services import matching_engine, hiring_score, skill_gap_analysis, interview_assistant, candidate_service, audit, settings_store
+from skill_taxonomy import format_skill_display
 import file_loader
 import parser
 
@@ -50,9 +58,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SmartHire AI Recruitment Copilot", lifespan=lifespan)
 
+cors_origins_env = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+if not allowed_origins:
+    allowed_origins = [
+        "http://localhost:8501",
+        "http://127.0.0.1:8501",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,8 +80,13 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 # ---------------------------------------------------------------------------
-# Auth dependency
 # ---------------------------------------------------------------------------
+# Supported Roles & Auth Dependencies
+# ---------------------------------------------------------------------------
+SUPPORTED_ROLES = {"Candidate", "Recruiter", "Admin"}
+SUPPORTED_ROLES_LOWER = {"candidate", "recruiter", "admin"}
+
+
 def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
@@ -71,6 +94,7 @@ def get_current_user(
     """
     Decode the Bearer JWT and return the corresponding User row.
     Raises 401 if the token is missing, expired, or invalid.
+    Raises 403 if the user's role is retired/unsupported (e.g. HR Manager).
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -89,7 +113,42 @@ def get_current_user(
     if user is None or not user.is_active:
         raise credentials_exception
 
+    if user.job_title not in SUPPORTED_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The HR Manager role has been retired and is no longer supported.",
+        )
+
     return user
+
+
+def require_roles(*allowed: str):
+    """Dependency factory ensuring current user belongs to one of allowed roles."""
+    def role_checker(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> User:
+        user_role = str(current_user.job_title).strip().lower()
+        allowed_normalized = {r.strip().lower() for r in allowed}
+        if user_role not in allowed_normalized:
+            audit.log_event(
+                db,
+                actor=current_user,
+                action="access_denied",
+                target_type="role_access",
+                details={"user_role": current_user.job_title, "required_roles": list(allowed)},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access forbidden: requires one of {list(allowed)} role(s).",
+            )
+        return current_user
+    return role_checker
+
+
+require_admin = require_roles("Admin")
+require_recruiter = require_roles("Recruiter")
+require_candidate = require_roles("Candidate")
 
 
 # ---------------------------------------------------------------------------
@@ -98,14 +157,63 @@ def get_current_user(
 
 @app.post("/api/auth/register", response_model=Token, status_code=201)
 def register(payload: UserCreate, db: Session = Depends(get_db)):
+    reg_open = settings_store.get_setting(db, "registration_open", default="true")
+    if str(reg_open).lower() == "false":
+        audit.log_event(
+            db,
+            actor=payload.email,
+            action="register_failure",
+            target_type="user",
+            details={"reason": "registration_closed"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public candidate registration is currently disabled by an administrator.",
+        )
+
+    role = (payload.job_title or "").strip()
+    if role.lower() in ("recruiter", "admin"):
+        audit.log_event(
+            db,
+            actor=payload.email,
+            action="register_failure",
+            target_type="user",
+            details={"reason": "privileged_role_not_allowed", "role": role},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"{role} accounts must be created by an administrator.",
+        )
+    if role.lower() != "candidate":
+        audit.log_event(
+            db,
+            actor=payload.email,
+            action="register_failure",
+            target_type="user",
+            details={"reason": "invalid_role", "role": role},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid role. Public registration only allows role 'Candidate'.",
+        )
+    payload.job_title = "Candidate"
+
     # Duplicate-email check
     existing = db.query(User).filter(User.email == payload.email).first()
     if existing:
+        audit.log_event(
+            db,
+            actor=payload.email,
+            action="register_failure",
+            target_type="user",
+            details={"reason": "duplicate_email"},
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="An account with this email already exists.",
         )
 
+    now_utc = datetime.now(timezone.utc)
     db_user = User(
         full_name=payload.full_name,
         email=payload.email,
@@ -113,10 +221,20 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
         company_name=payload.company_name,
         job_title=payload.job_title,
         phone_number=payload.phone_number,
+        last_login_at=now_utc,
     )
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
+
+    audit.log_event(
+        db,
+        actor=db_user,
+        action="register_success",
+        target_type="user",
+        target_id=db_user.user_id,
+        details={"email": db_user.email, "role": db_user.job_title},
+    )
 
     token = create_access_token({"sub": db_user.email})
     return Token(access_token=token, user=UserResponse.from_orm_model(db_user))
@@ -130,11 +248,42 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
     # 1. Primary lookup by exact email match
     exact_user = db.query(User).filter(func.lower(User.email) == ident_lower).first()
     if exact_user and verify_password(payload.password, exact_user.password_hash):
+        if exact_user.job_title not in SUPPORTED_ROLES:
+            audit.log_event(
+                db,
+                actor=exact_user.email,
+                action="login_failure",
+                target_type="user",
+                target_id=exact_user.user_id,
+                details={"reason": "role_retired"},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="The HR Manager role has been retired and is no longer supported. Please contact your administrator.",
+            )
         if not exact_user.is_active:
+            audit.log_event(
+                db,
+                actor=exact_user.email,
+                action="login_failure",
+                target_type="user",
+                target_id=exact_user.user_id,
+                details={"reason": "account_disabled"},
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Your account is disabled. Contact your administrator.",
             )
+        exact_user.last_login_at = datetime.now(timezone.utc)
+        db.commit()
+        audit.log_event(
+            db,
+            actor=exact_user,
+            action="login_success",
+            target_type="user",
+            target_id=exact_user.user_id,
+            details={"email": exact_user.email, "role": exact_user.job_title},
+        )
         token = create_access_token({"sub": exact_user.email})
         return Token(access_token=token, user=UserResponse.from_orm_model(exact_user))
 
@@ -152,14 +301,52 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
     )
     for u in candidates_matching:
         if verify_password(payload.password, u.password_hash):
+            if u.job_title not in SUPPORTED_ROLES:
+                audit.log_event(
+                    db,
+                    actor=u.email,
+                    action="login_failure",
+                    target_type="user",
+                    target_id=u.user_id,
+                    details={"reason": "role_retired"},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="The HR Manager role has been retired and is no longer supported. Please contact your administrator.",
+                )
             if not u.is_active:
+                audit.log_event(
+                    db,
+                    actor=u.email,
+                    action="login_failure",
+                    target_type="user",
+                    target_id=u.user_id,
+                    details={"reason": "account_disabled"},
+                )
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Your account is disabled. Contact your administrator.",
                 )
+            u.last_login_at = datetime.now(timezone.utc)
+            db.commit()
+            audit.log_event(
+                db,
+                actor=u,
+                action="login_success",
+                target_type="user",
+                target_id=u.user_id,
+                details={"email": u.email, "role": u.job_title},
+            )
             token = create_access_token({"sub": u.email})
             return Token(access_token=token, user=UserResponse.from_orm_model(u))
 
+    audit.log_event(
+        db,
+        actor=ident,
+        action="login_failure",
+        target_type="user",
+        details={"reason": "invalid_credentials"},
+    )
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Incorrect email or password.",
@@ -173,6 +360,19 @@ def get_me(current_user: User = Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
+# Admin routes (Phase 2)
+# ---------------------------------------------------------------------------
+from admin_routes import router as admin_router
+app.include_router(admin_router)
+
+
+@app.get("/api/settings")
+def get_public_settings(db: Session = Depends(get_db)):
+    """Return public platform configuration and feature flags."""
+    return {k: settings_store.get_setting(db, k) for k in settings_store.DEFAULT_SETTINGS}
+
+
+# ---------------------------------------------------------------------------
 # Candidate endpoints  (all protected — require valid JWT)
 # ---------------------------------------------------------------------------
 
@@ -180,9 +380,18 @@ def get_me(current_user: User = Depends(get_current_user)):
 async def upload_candidate(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
-    file_path = os.path.join("uploads", file.filename)
+    safe_filename = os.path.basename(file.filename or "resume.pdf")
+    ext = os.path.splitext(safe_filename)[1].lower()
+    if ext not in [".pdf", ".docx", ".txt"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file format. Please upload a .pdf, .docx, or .txt resume.",
+        )
+
+    os.makedirs("uploads", exist_ok=True)
+    file_path = os.path.join("uploads", safe_filename)
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
 
@@ -195,9 +404,15 @@ async def upload_candidate(
     db_candidate = None
     email_val = parsed_data.get("email")
     if email_val:
-        db_candidate = db.query(Candidate).filter(Candidate.email == email_val).first()
+        db_candidate = db.query(Candidate).filter(
+            Candidate.email == email_val,
+            Candidate.deleted_at.is_(None),
+        ).first()
     if not db_candidate:
-        db_candidate = db.query(Candidate).filter(Candidate.resume_path == file.filename).first()
+        db_candidate = db.query(Candidate).filter(
+            Candidate.resume_path == safe_filename,
+            Candidate.deleted_at.is_(None),
+        ).first()
 
     if db_candidate:
         db_candidate.name = parsed_data.get("name") or db_candidate.name
@@ -208,7 +423,7 @@ async def upload_candidate(
         db_candidate.experience = json.dumps(parsed_data.get("experience", []))
         db_candidate.certifications = json.dumps(parsed_data.get("certifications", []))
         db_candidate.projects = json.dumps(parsed_data.get("projects", []))
-        db_candidate.resume_path = file.filename
+        db_candidate.resume_path = safe_filename
     else:
         db_candidate = Candidate(
             name=parsed_data.get("name"),
@@ -219,12 +434,33 @@ async def upload_candidate(
             experience=json.dumps(parsed_data.get("experience", [])),
             certifications=json.dumps(parsed_data.get("certifications", [])),
             projects=json.dumps(parsed_data.get("projects", [])),
-            resume_path=file.filename,
+            resume_path=safe_filename,
         )
         db.add(db_candidate)
 
     db.commit()
     db.refresh(db_candidate)
+
+    existing_app = db.query(Application).filter(Application.candidate_id == db_candidate.candidate_id).first()
+    if not existing_app:
+        db_candidate.stage = "new"
+        new_app = Application(
+            candidate_id=db_candidate.candidate_id,
+            recruiter_id=_user.user_id,
+            stage="new",
+            stage_history=json.dumps([{
+                "from_stage": None,
+                "to_stage": "new",
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "updated_by": _user.email,
+                "notes": "Added via resume upload"
+            }]),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc)
+        )
+        db.add(new_app)
+        db.commit()
+
     return CandidateResponse.from_orm_model(db_candidate)
 
 
@@ -234,9 +470,9 @@ def get_candidates(
     skip: int = 0,
     limit: int = Query(100, ge=1, le=50000),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
-    query = db.query(Candidate)
+    query = db.query(Candidate).filter(Candidate.deleted_at.is_(None))
     if search:
         pattern = f"%{search}%"
         query = query.filter(
@@ -276,12 +512,13 @@ def _candidate_to_dict(c: Candidate) -> dict:
         "certifications": _parse_json(c.certifications),
         "projects": _parse_json(c.projects),
         "resume_path": c.resume_path,
+        "stage": (c.stage or "new").lower(),
     }
 
 
 def _load_candidates_as_dicts(db: Session) -> List[dict]:
     """Helper to load all Candidate rows into deserialized dictionaries."""
-    candidates = db.query(Candidate).all()
+    candidates = db.query(Candidate).filter(Candidate.deleted_at.is_(None)).all()
     return [_candidate_to_dict(c) for c in candidates]
 
 
@@ -310,13 +547,41 @@ def _job_to_dict(job: Job) -> dict:
     }
 
 
+def _pipeline_match_score(cand_row: Any, job_row: Any) -> Optional[float]:
+    """Compute candidate-job match score for pipeline cards and details."""
+    if not cand_row or not job_row:
+        return None
+    try:
+        cand_dict = _candidate_to_dict(cand_row) if not isinstance(cand_row, dict) else cand_row
+        job_dict = _job_to_dict(job_row) if not isinstance(job_row, dict) else job_row
+        score_data = matching_engine.score_candidate(
+            candidate_skills=cand_dict.get("skills", []),
+            candidate_experience=cand_dict.get("experience", []),
+            job=job_dict,
+        )
+        score_val = score_data.get("final_score")
+        if score_val is None:
+            score_val = score_data.get("overall_score")
+        if score_val is not None:
+            return round(float(score_val), 1)
+        return None
+    except Exception as e:
+        logger.warning(
+            "Failed computing pipeline match score for candidate %s, job %s: %s",
+            getattr(cand_row, "candidate_id", None),
+            getattr(job_row, "job_id", None),
+            e,
+        )
+        return None
+
+
 @app.get("/api/candidates/hiring-scores", response_model=List[HiringScoreBreakdown])
 def get_candidates_hiring_scores(
     job_id: Optional[int] = None,
     skip: int = 0,
     limit: Optional[int] = None,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """
     Compute and return job-independent Hiring Scores for all candidates, sorted descending.
@@ -370,12 +635,15 @@ def get_candidates_hiring_scores(
 def get_candidate_hiring_score(
     candidate_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """
     Compute and return the detailed job-independent Hiring Score breakdown for a single candidate.
     """
-    candidate = db.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
+    candidate = db.query(Candidate).filter(
+        Candidate.candidate_id == candidate_id,
+        Candidate.deleted_at.is_(None),
+    ).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
@@ -395,9 +663,12 @@ def get_candidate_hiring_score(
 def get_candidate(
     candidate_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
-    candidate = db.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
+    candidate = db.query(Candidate).filter(
+        Candidate.candidate_id == candidate_id,
+        Candidate.deleted_at.is_(None),
+    ).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
     return CandidateResponse.from_orm_model(candidate)
@@ -407,24 +678,624 @@ def get_candidate(
 def delete_candidate(
     candidate_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
-    candidate = db.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
+    candidate = db.query(Candidate).filter(
+        Candidate.candidate_id == candidate_id,
+        Candidate.deleted_at.is_(None),
+    ).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
-    db.delete(candidate)
+    candidate.deleted_at = datetime.now(timezone.utc)
+    db.query(Application).filter(Application.candidate_id == candidate_id).delete()
+    db.query(InterviewSession).filter(InterviewSession.candidate_id == candidate_id).delete()
+    db.query(ResumeAnalysis).filter(ResumeAnalysis.candidate_id == candidate_id).delete()
+    db.query(PracticeAnswer).filter(PracticeAnswer.candidate_id == candidate_id).delete()
+    audit.log_event(
+        db,
+        actor=_user,
+        action="delete_candidate",
+        target_type="candidate",
+        target_id=candidate_id,
+        details={"name": candidate.name, "email": candidate.email},
+    )
     db.commit()
     return {"message": "Candidate deleted successfully"}
 
 
 @app.delete("/api/candidates")
 def delete_all_candidates(
-    db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
-    count = db.query(Candidate).delete()
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Bulk deletion of candidates is disabled. Use the admin purge API or delete individually.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Recruitment Pipeline Endpoints
+# ---------------------------------------------------------------------------
+
+def _get_candidate_initials(name: Optional[str]) -> str:
+    if not name or not name.strip():
+        return "CN"
+    parts = name.strip().split()
+    if len(parts) >= 2:
+        return (parts[0][0] + parts[1][0]).upper()
+    elif len(parts) == 1 and len(parts[0]) > 0:
+        return parts[0][:2].upper()
+    return "CN"
+
+
+@app.get("/api/pipeline", response_model=PipelineBoardResponse)
+def get_recruitment_pipeline(
+    job_id: Optional[int] = None,
+    search: Optional[str] = None,
+    stage: Optional[str] = None,
+    skill: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_recruiter),
+):
+    """
+    Returns the six-stage recruitment pipeline board with candidate cards.
+    Stage counts reflect persistent database totals.
+    Accessible exclusively to Recruiters.
+    """
+    # Base query for all applications
+    apps_query = db.query(Application, Candidate, Job).join(
+        Candidate, Application.candidate_id == Candidate.candidate_id
+    ).outerjoin(
+        Job, Application.job_id == Job.job_id
+    ).filter(
+        Candidate.deleted_at.is_(None)
+    )
+
+    all_apps = apps_query.all()
+
+    # Pre-compute total stage counts across the whole database
+    counts = {s: 0 for s in VALID_PIPELINE_STAGES}
+    for app_row, cand_row, _ in all_apps:
+        stg = (app_row.stage or "new").lower()
+        if stg in counts:
+            counts[stg] += 1
+        else:
+            counts["new"] += 1
+    counts["total"] = len(all_apps)
+
+    filtered_stages = {s: [] for s in VALID_PIPELINE_STAGES}
+    filtered_counts = {s: 0 for s in VALID_PIPELINE_STAGES}
+
+    search_norm = search.strip().lower() if search and search.strip() else None
+    stage_filter = stage.strip().lower() if stage and stage.strip() else None
+    skill_filter = skill.strip().lower() if skill and skill.strip() else None
+
+    for app_row, cand_row, job_row in all_apps:
+        # Check Job filter
+        if job_id is not None and app_row.job_id != job_id:
+            continue
+
+        # Check Stage filter
+        app_stage = (app_row.stage or "new").lower()
+        if app_stage not in VALID_PIPELINE_STAGES:
+            app_stage = "new"
+        if stage_filter and app_stage != stage_filter:
+            continue
+
+        # Parse skills
+        cand_skills = []
+        if cand_row.skills:
+            try:
+                raw_sk = json.loads(cand_row.skills)
+                cand_skills = raw_sk if isinstance(raw_sk, list) else []
+            except Exception:
+                cand_skills = []
+
+        # Check Skill filter
+        if skill_filter:
+            if not any(skill_filter in s.lower() for s in cand_skills):
+                continue
+
+        # Check Search filter (name, email, skills)
+        if search_norm:
+            cand_name = (cand_row.name or "").lower()
+            cand_email = (cand_row.email or "").lower()
+            skills_text = " ".join([s.lower() for s in cand_skills])
+            if (search_norm not in cand_name and
+                search_norm not in cand_email and
+                search_norm not in skills_text):
+                continue
+
+        # Parse history
+        history = []
+        if app_row.stage_history:
+            try:
+                hist_raw = json.loads(app_row.stage_history)
+                history = hist_raw if isinstance(hist_raw, list) else []
+            except Exception:
+                history = []
+
+        # Calculate match score via shared helper
+        match_score = _pipeline_match_score(cand_row, job_row)
+
+        card = ApplicationCardResponse(
+            application_id=app_row.application_id,
+            candidate_id=cand_row.candidate_id,
+            candidate_name=cand_row.name or "Unnamed Candidate",
+            candidate_email=cand_row.email,
+            candidate_phone=cand_row.phone,
+            candidate_initials=_get_candidate_initials(cand_row.name),
+            job_id=job_row.job_id if job_row else None,
+            job_title=job_row.title if job_row else "General Applicant",
+            skills=cand_skills,
+            stage=app_stage,
+            match_score=match_score,
+            notes=app_row.notes,
+            resume_path=cand_row.resume_path,
+            stage_history=history,
+            created_at=app_row.created_at.strftime("%Y-%m-%d %H:%M") if app_row.created_at else "",
+            updated_at=app_row.updated_at.strftime("%Y-%m-%d %H:%M") if app_row.updated_at else "",
+        )
+
+        filtered_stages[app_stage].append(card)
+        filtered_counts[app_stage] += 1
+
+    filtered_counts["total"] = sum(filtered_counts[s] for s in VALID_PIPELINE_STAGES)
+
+    return PipelineBoardResponse(
+        stages=filtered_stages,
+        counts=counts,
+        filtered_counts=filtered_counts,
+        total_applications=counts["total"]
+    )
+
+
+@app.patch("/api/pipeline/applications/{application_id}/stage", response_model=ApplicationCardResponse)
+def update_application_stage(
+    application_id: int,
+    payload: ApplicationStageUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_recruiter),
+):
+    """
+    Moves an application card between hiring stages.
+    Persists stage update and records audit log in stage_history.
+    """
+    new_stage = payload.stage.strip().lower()
+    if new_stage not in VALID_PIPELINE_STAGES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid stage '{payload.stage}'. Must be one of: {', '.join(VALID_PIPELINE_STAGES)}"
+        )
+
+    app_row = db.query(Application).filter(Application.application_id == application_id).first()
+    if not app_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found.")
+
+    cand_row = db.query(Candidate).filter(Candidate.candidate_id == app_row.candidate_id).first()
+    if not cand_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Associated candidate not found.")
+
+    job_row = db.query(Job).filter(Job.job_id == app_row.job_id).first() if app_row.job_id else None
+
+    old_stage = app_row.stage
+    now_utc = datetime.now(timezone.utc)
+
+    history = []
+    if app_row.stage_history:
+        try:
+            h_raw = json.loads(app_row.stage_history)
+            history = h_raw if isinstance(h_raw, list) else []
+        except Exception:
+            history = []
+
+    history.append({
+        "from_stage": old_stage,
+        "to_stage": new_stage,
+        "timestamp": now_utc.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "updated_by": current_user.email,
+        "notes": payload.notes or ""
+    })
+
+    app_row.stage = new_stage
+    if payload.notes is not None:
+        app_row.notes = payload.notes
+    app_row.stage_history = json.dumps(history)
+    app_row.updated_at = now_utc
+
+    cand_row.stage = new_stage
+
     db.commit()
-    return {"deleted": count}
+    db.refresh(app_row)
+
+    cand_skills = []
+    if cand_row.skills:
+        try:
+            raw_sk = json.loads(cand_row.skills)
+            cand_skills = raw_sk if isinstance(raw_sk, list) else []
+        except Exception:
+            cand_skills = []
+
+    match_score = _pipeline_match_score(cand_row, job_row)
+
+    return ApplicationCardResponse(
+        application_id=app_row.application_id,
+        candidate_id=cand_row.candidate_id,
+        candidate_name=cand_row.name or "Unnamed Candidate",
+        candidate_email=cand_row.email,
+        candidate_phone=cand_row.phone,
+        candidate_initials=_get_candidate_initials(cand_row.name),
+        job_id=job_row.job_id if job_row else None,
+        job_title=job_row.title if job_row else "General Applicant",
+        skills=cand_skills,
+        stage=app_row.stage,
+        match_score=match_score,
+        notes=app_row.notes,
+        resume_path=cand_row.resume_path,
+        stage_history=history,
+        created_at=app_row.created_at.strftime("%Y-%m-%d %H:%M") if app_row.created_at else "",
+        updated_at=app_row.updated_at.strftime("%Y-%m-%d %H:%M") if app_row.updated_at else "",
+    )
+
+
+@app.patch("/api/candidates/{candidate_id}/stage")
+def update_candidate_stage_direct(
+    candidate_id: int,
+    payload: ApplicationStageUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_recruiter),
+):
+    """Convenience endpoint to update stage by candidate ID."""
+    new_stage = payload.stage.strip().lower()
+    if new_stage not in VALID_PIPELINE_STAGES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid stage '{payload.stage}'."
+        )
+
+    cand = db.query(Candidate).filter(
+        Candidate.candidate_id == candidate_id,
+        Candidate.deleted_at.is_(None),
+    ).first()
+    if not cand:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
+
+    cand.stage = new_stage
+    app_row = db.query(Application).filter(Application.candidate_id == candidate_id).order_by(Application.application_id.desc()).first()
+    if app_row:
+        app_row.stage = new_stage
+        app_row.updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+    return {"candidate_id": candidate_id, "stage": new_stage}
+
+
+@app.patch("/api/pipeline/applications/{application_id}/notes")
+def update_application_notes(
+    application_id: int,
+    payload: ApplicationNotesUpdate,
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_recruiter),
+):
+    app_row = db.query(Application).filter(Application.application_id == application_id).first()
+    if not app_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found.")
+    app_row.notes = payload.notes
+    app_row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"application_id": application_id, "notes": app_row.notes}
+
+
+@app.post("/api/pipeline/applications", response_model=ApplicationCardResponse, status_code=status.HTTP_201_CREATED)
+def add_application_to_pipeline(
+    payload: ApplicationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_recruiter),
+):
+    """
+    Associates an existing candidate with a job position in the pipeline.
+    Prevents duplicate entries for the same candidate and job.
+    """
+    cand = db.query(Candidate).filter(
+        Candidate.candidate_id == payload.candidate_id,
+        Candidate.deleted_at.is_(None),
+    ).first()
+    if not cand:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
+
+    job = db.query(Job).filter(Job.job_id == payload.job_id).first() if payload.job_id else None
+
+    # Check for duplicate
+    dup_filter = (Application.candidate_id == payload.candidate_id)
+    if payload.job_id:
+        dup_filter = dup_filter & (Application.job_id == payload.job_id)
+    else:
+        dup_filter = dup_filter & (Application.job_id.is_(None))
+
+    existing = db.query(Application).filter(dup_filter).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Candidate is already in the pipeline for this position."
+        )
+
+    initial_stage = (payload.stage or "new").strip().lower()
+    now_utc = datetime.now(timezone.utc)
+    history = [{
+        "from_stage": None,
+        "to_stage": initial_stage,
+        "timestamp": now_utc.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "updated_by": current_user.email,
+        "notes": payload.notes or "Added to pipeline"
+    }]
+
+    new_app = Application(
+        candidate_id=cand.candidate_id,
+        job_id=job.job_id if job else None,
+        recruiter_id=current_user.user_id,
+        stage=initial_stage,
+        notes=payload.notes,
+        stage_history=json.dumps(history),
+        created_at=now_utc,
+        updated_at=now_utc,
+    )
+    cand.stage = initial_stage
+    db.add(new_app)
+    db.commit()
+    db.refresh(new_app)
+
+    cand_skills = []
+    if cand.skills:
+        try:
+            raw_sk = json.loads(cand.skills)
+            cand_skills = raw_sk if isinstance(raw_sk, list) else []
+        except Exception:
+            cand_skills = []
+
+    match_score = _pipeline_match_score(cand, job)
+
+    return ApplicationCardResponse(
+        application_id=new_app.application_id,
+        candidate_id=cand.candidate_id,
+        candidate_name=cand.name or "Unnamed Candidate",
+        candidate_email=cand.email,
+        candidate_phone=cand.phone,
+        candidate_initials=_get_candidate_initials(cand.name),
+        job_id=job.job_id if job else None,
+        job_title=job.title if job else "General Applicant",
+        skills=cand_skills,
+        stage=new_app.stage,
+        match_score=match_score,
+        notes=new_app.notes,
+        resume_path=cand.resume_path,
+        stage_history=history,
+        created_at=new_app.created_at.strftime("%Y-%m-%d %H:%M") if new_app.created_at else "",
+        updated_at=new_app.updated_at.strftime("%Y-%m-%d %H:%M") if new_app.updated_at else "",
+    )
+
+
+@app.post("/api/pipeline/candidates", response_model=ApplicationCardResponse, status_code=status.HTTP_201_CREATED)
+def create_candidate_and_pipeline(
+    payload: CandidateAddPipeline,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_recruiter),
+):
+    """
+    Registers a new candidate record and creates an initial pipeline entry.
+    """
+    email_clean = payload.email.strip().lower()
+    existing_cand = db.query(Candidate).filter(
+        func.lower(Candidate.email) == email_clean,
+        Candidate.deleted_at.is_(None),
+    ).first()
+    if existing_cand:
+        cand = existing_cand
+    else:
+        cand_skills = payload.skills
+        if isinstance(cand_skills, str):
+            cand_skills = [s.strip() for s in cand_skills.split(",") if s.strip()]
+        elif not cand_skills:
+            cand_skills = []
+
+        cand_edu = payload.education
+        if isinstance(cand_edu, str):
+            cand_edu = [{"degree": cand_edu.strip()}] if cand_edu.strip() else []
+        elif not cand_edu:
+            cand_edu = []
+
+        cand_exp = payload.experience
+        if isinstance(cand_exp, str):
+            cand_exp = [{"title": cand_exp.strip()}] if cand_exp.strip() else []
+        elif not cand_exp:
+            cand_exp = []
+
+        cand = Candidate(
+            name=payload.name.strip(),
+            email=email_clean,
+            phone=payload.phone.strip() if payload.phone else None,
+            skills=json.dumps(cand_skills),
+            education=json.dumps(cand_edu),
+            experience=json.dumps(cand_exp),
+            stage=payload.stage or "new",
+            created_at=datetime.now(timezone.utc)
+        )
+        db.add(cand)
+        db.commit()
+        db.refresh(cand)
+
+    job = db.query(Job).filter(Job.job_id == payload.job_id).first() if payload.job_id else None
+    dup_q = db.query(Application).filter(Application.candidate_id == cand.candidate_id)
+    if payload.job_id:
+        dup_q = dup_q.filter(Application.job_id == payload.job_id)
+    else:
+        dup_q = dup_q.filter(Application.job_id.is_(None))
+
+    existing_app = dup_q.first()
+    if existing_app:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Candidate already has an application entry for this position."
+        )
+
+    initial_stage = (payload.stage or "new").strip().lower()
+    now_utc = datetime.now(timezone.utc)
+    history = [{
+        "from_stage": None,
+        "to_stage": initial_stage,
+        "timestamp": now_utc.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "updated_by": current_user.email,
+        "notes": payload.notes or "Created and added to pipeline"
+    }]
+
+    new_app = Application(
+        candidate_id=cand.candidate_id,
+        job_id=job.job_id if job else None,
+        recruiter_id=current_user.user_id,
+        stage=initial_stage,
+        notes=payload.notes,
+        stage_history=json.dumps(history),
+        created_at=now_utc,
+        updated_at=now_utc,
+    )
+    cand.stage = initial_stage
+    db.add(new_app)
+    db.commit()
+    db.refresh(new_app)
+    cand_skills = []
+    if cand.skills:
+        try:
+            raw_sk = json.loads(cand.skills)
+            cand_skills = raw_sk if isinstance(raw_sk, list) else []
+        except Exception:
+            cand_skills = []
+    match_score = _pipeline_match_score(cand, job)
+
+    return ApplicationCardResponse(
+        application_id=new_app.application_id,
+        candidate_id=cand.candidate_id,
+        candidate_name=cand.name or "Unnamed Candidate",
+        candidate_email=cand.email,
+        candidate_phone=cand.phone,
+        candidate_initials=_get_candidate_initials(cand.name),
+        job_id=job.job_id if job else None,
+        job_title=job.title if job else "General Applicant",
+        skills=cand_skills,
+        stage=new_app.stage,
+        match_score=match_score,
+        notes=new_app.notes,
+        resume_path=cand.resume_path,
+        stage_history=history,
+        created_at=new_app.created_at.strftime("%Y-%m-%d %H:%M") if new_app.created_at else "",
+        updated_at=new_app.updated_at.strftime("%Y-%m-%d %H:%M") if new_app.updated_at else "",
+    )
+
+
+@app.get("/api/pipeline/applications/{application_id}", response_model=CandidatePipelineDetailResponse)
+def get_pipeline_application_detail(
+    application_id: int,
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_recruiter),
+):
+    """
+    Returns full profile, match evaluation, recruiter notes, interview history, and stage audit log.
+    """
+    app_row = db.query(Application).filter(Application.application_id == application_id).first()
+    if not app_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found.")
+
+    cand = db.query(Candidate).filter(Candidate.candidate_id == app_row.candidate_id).first()
+    if not cand:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Associated candidate not found.")
+
+    job = db.query(Job).filter(Job.job_id == app_row.job_id).first() if app_row.job_id else None
+
+    def _parse_list(field):
+        if not field:
+            return []
+        try:
+            val = json.loads(field)
+            return val if isinstance(val, list) else []
+        except Exception:
+            return []
+
+    skills = _parse_list(cand.skills)
+    education = _parse_list(cand.education)
+    experience = _parse_list(cand.experience)
+    certifications = _parse_list(cand.certifications)
+    projects = _parse_list(cand.projects)
+    stage_history = _parse_list(app_row.stage_history)
+
+    match_score = None
+    match_breakdown = None
+    if job:
+        try:
+            cand_dict = _candidate_to_dict(cand)
+            job_dict = _job_to_dict(job)
+            match_breakdown = matching_engine.score_candidate(
+                candidate_skills=cand_dict.get("skills", []),
+                candidate_experience=cand_dict.get("experience", []),
+                job=job_dict,
+            )
+            score_val = match_breakdown.get("final_score")
+            if score_val is None:
+                score_val = match_breakdown.get("overall_score")
+            if score_val is not None:
+                match_score = round(float(score_val), 1)
+        except Exception as e:
+            logger.warning("Error computing match breakdown for candidate %s, job %s: %s", getattr(cand, "candidate_id", None), getattr(job, "job_id", None), e)
+
+    interviews = []
+    sess_query = db.query(InterviewSession).filter(InterviewSession.candidate_id == cand.candidate_id).all()
+    for s in sess_query:
+        fb_dict = None
+        if s.feedback:
+            try:
+                fb_dict = json.loads(s.feedback)
+            except Exception:
+                pass
+        interviews.append({
+            "session_id": s.session_id,
+            "job_id": s.job_id,
+            "status": s.status,
+            "difficulty": s.difficulty,
+            "interview_type": s.interview_type,
+            "created_at": s.created_at.strftime("%Y-%m-%d %H:%M") if s.created_at else "",
+            "feedback": fb_dict
+        })
+
+    job_req_skills = []
+    if job and job.required_skills:
+        try:
+            raw_req = json.loads(job.required_skills)
+            job_req_skills = raw_req if isinstance(raw_req, list) else []
+        except Exception:
+            pass
+
+    return CandidatePipelineDetailResponse(
+        application_id=app_row.application_id,
+        candidate_id=cand.candidate_id,
+        name=cand.name or "Unnamed Candidate",
+        email=cand.email,
+        phone=cand.phone,
+        skills=skills,
+        education=education,
+        experience=experience,
+        certifications=certifications,
+        projects=projects,
+        resume_path=cand.resume_path,
+        job_id=job.job_id if job else None,
+        job_title=job.title if job else "General Applicant",
+        job_department=job.department if job else None,
+        job_required_skills=job_req_skills,
+        stage=app_row.stage,
+        match_score=match_score,
+        match_breakdown=match_breakdown,
+        notes=app_row.notes,
+        stage_history=stage_history,
+        interviews=interviews,
+        created_at=app_row.created_at.strftime("%Y-%m-%d %H:%M") if app_row.created_at else "",
+        updated_at=app_row.updated_at.strftime("%Y-%m-%d %H:%M") if app_row.updated_at else "",
+    )
 
 
 def _compute_skill_stats(db: Session):
@@ -437,7 +1308,7 @@ def _compute_skill_stats(db: Session):
         - all_skills: flat list of every normalised skill token (with repeats)
         - counts: Counter mapping each unique skill -> occurrence count
     """
-    candidates = db.query(Candidate).all()
+    candidates = db.query(Candidate).filter(Candidate.deleted_at.is_(None)).all()
     candidates_total = len(candidates)
     resumes_parsed = 0
     all_skills: list[str] = []
@@ -458,7 +1329,7 @@ def _compute_skill_stats(db: Session):
 @app.get("/api/analytics/summary", response_model=AnalyticsSummary)
 def get_analytics_summary(
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """Top-level dashboard stats (independent of list pagination)."""
     candidates_total, resumes_parsed, all_skills, counts = _compute_skill_stats(db)
@@ -479,10 +1350,10 @@ def get_analytics_summary(
 @app.get("/api/analytics/skills", response_model=List[SkillFrequency])
 def get_skills_analytics(
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     _total, _parsed, _all, counts = _compute_skill_stats(db)
-    return [SkillFrequency(skill=skill.title(), count=count) for skill, count in counts.most_common()]
+    return [SkillFrequency(skill=format_skill_display(skill), count=count) for skill, count in counts.most_common()]
 
 
 
@@ -494,7 +1365,7 @@ def get_skills_analytics(
 def create_job(
     payload: JobCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_recruiter),
 ):
     db_job = Job(
         title=payload.title,
@@ -506,7 +1377,7 @@ def create_job(
         min_experience_years=payload.min_experience_years,
         required_skills=json.dumps(payload.required_skills or []),
         nice_to_have_skills=json.dumps(payload.nice_to_have_skills or []),
-        status=payload.status or "open",
+        status=(payload.status or "open").strip().lower(),
         created_by=current_user.user_id,
     )
     db.add(db_job)
@@ -519,11 +1390,11 @@ def create_job(
 def get_jobs(
     status: Optional[str] = None,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     query = db.query(Job)
     if status:
-        query = query.filter(Job.status == status)
+        query = query.filter(func.lower(Job.status) == status.strip().lower())
     jobs = query.order_by(Job.created_at.desc()).all()
     return [JobResponse.from_orm_model(j) for j in jobs]
 
@@ -532,7 +1403,7 @@ def get_jobs(
 def get_job(
     job_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     job = db.query(Job).filter(Job.job_id == job_id).first()
     if not job:
@@ -545,7 +1416,7 @@ def update_job(
     job_id: int,
     payload: JobUpdate,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     job = db.query(Job).filter(Job.job_id == job_id).first()
     if not job:
@@ -570,7 +1441,7 @@ def update_job(
     if payload.nice_to_have_skills is not None:
         job.nice_to_have_skills = json.dumps(payload.nice_to_have_skills)
     if payload.status is not None:
-        job.status = payload.status
+        job.status = payload.status.strip().lower()
 
     db.commit()
     db.refresh(job)
@@ -581,11 +1452,15 @@ def update_job(
 def delete_job(
     job_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     job = db.query(Job).filter(Job.job_id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    db.query(Application).filter(Application.job_id == job_id).update({Application.job_id: None})
+    db.query(InterviewSession).filter(InterviewSession.job_id == job_id).delete()
+    db.query(ResumeAnalysis).filter(ResumeAnalysis.target_job_id == job_id).update({ResumeAnalysis.target_job_id: None})
+    db.query(PracticeAnswer).filter(PracticeAnswer.job_id == job_id).update({PracticeAnswer.job_id: None})
     db.delete(job)
     db.commit()
     return {"message": "Job deleted successfully"}
@@ -599,7 +1474,7 @@ def delete_job(
 def match_candidates_for_job(
     job_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """
     Match and rank candidates against a persisted Job record.
@@ -626,7 +1501,7 @@ class MatchRequest(BaseModel):
 def match_candidates(
     req: MatchRequest,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """
     Backward-compatible quick match endpoint accepting free-text required skills.
@@ -675,7 +1550,7 @@ def export_skill_gap_report(
     job_id: int,
     format: Literal["csv", "docx"] = "csv",
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """
     Export skill gap report as downloadable CSV or DOCX document.
@@ -798,7 +1673,7 @@ def get_candidate_skill_gap(
     job_id: int,
     candidate_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """
     Get skill gaps for a specific candidate against a specific job posting.
@@ -807,7 +1682,10 @@ def get_candidate_skill_gap(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    candidate = db.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
+    candidate = db.query(Candidate).filter(
+        Candidate.candidate_id == candidate_id,
+        Candidate.deleted_at.is_(None),
+    ).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
@@ -863,14 +1741,17 @@ def get_candidate_development_report(
     job_id: int,
     candidate_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """Richer companion to get_candidate_skill_gap: fit score, readiness,
     matched skills, and pool-relative priority per missing skill."""
     job = db.query(Job).filter(Job.job_id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    candidate = db.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
+    candidate = db.query(Candidate).filter(
+        Candidate.candidate_id == candidate_id,
+        Candidate.deleted_at.is_(None),
+    ).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
@@ -886,13 +1767,16 @@ def export_candidate_development_report(
     candidate_id: int,
     format: Literal["csv", "docx"] = "docx",
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """Export one candidate's development report as CSV or DOCX."""
     job = db.query(Job).filter(Job.job_id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    candidate = db.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
+    candidate = db.query(Candidate).filter(
+        Candidate.candidate_id == candidate_id,
+        Candidate.deleted_at.is_(None),
+    ).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
@@ -928,7 +1812,7 @@ def export_batch_candidate_development_reports(
     job_id: int,
     top_n: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """Zip one DOCX development report per top-N ranked candidate for this
     job. Capped at 50 — each report scans the whole pool, so this loops
@@ -969,7 +1853,7 @@ def export_batch_candidate_development_reports(
 def get_job_skill_gap_report(
     job_id: int,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """
     Generate aggregated skill gap report across candidate pool for a specific job.
@@ -994,7 +1878,7 @@ def get_interview_questions(
     question_type: Literal["Technical", "Behavioral", "Scenario-based"] = "Technical",
     count: int = Query(3, ge=1, le=10),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     job = db.query(Job).filter(Job.job_id == job_id).first()
     if not job:
@@ -1014,7 +1898,7 @@ def get_practice_questions(
     question_format: Literal["Open-ended", "Multiple Choice"] = "Open-ended",
     count: int = Query(3, ge=1, le=10),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_recruiter),
 ):
     """Richer sibling of get_interview_questions: adds difficulty and MCQ
     format. Does not replace the existing endpoint."""
@@ -1052,8 +1936,8 @@ def _session_to_response(session: "InterviewSession", db: Session) -> dict:
         "interview_type": getattr(session, "interview_type", "mixed") or "mixed",
         "difficulty": getattr(session, "difficulty", "Medium") or "Medium",
         "scheduled_at": session.scheduled_at.isoformat() if session.scheduled_at else None,
-        "created_at": session.created_at.isoformat(),
-        "updated_at": session.updated_at.isoformat(),
+        "created_at": session.created_at.isoformat() if session.created_at else None,
+        "updated_at": session.updated_at.isoformat() if session.updated_at else None,
     }
 
 
@@ -1061,7 +1945,7 @@ def _session_to_response(session: "InterviewSession", db: Session) -> dict:
 def create_interview_session(
     payload: InterviewSessionCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_recruiter),
 ):
     """Adds a candidate to the interview pipeline. Pure record-keeping — does
     not call any LLM. (The AI interview simulation feature, if added later,
@@ -1094,7 +1978,7 @@ def create_interview_session(
 @app.post("/api/interview-sessions/{session_id}/respond", response_model=InterviewSessionResponse)
 def respond_to_interview(
     session_id: int, payload: InterviewCandidateMessage,
-    db: Session = Depends(get_db), _user: User = Depends(get_current_user),
+    db: Session = Depends(get_db), _user: User = Depends(require_recruiter),
 ):
     """Drives the AI interviewer forward. Call with no message to generate
     the opening message for a freshly-created session; call with a message
@@ -1128,7 +2012,7 @@ def respond_to_interview(
 
 @app.post("/api/interview-sessions/{session_id}/complete", response_model=InterviewSessionResponse)
 def complete_interview_session(
-    session_id: int, db: Session = Depends(get_db), _user: User = Depends(get_current_user),
+    session_id: int, db: Session = Depends(get_db), _user: User = Depends(require_recruiter),
 ):
     session = db.query(InterviewSession).filter(InterviewSession.session_id == session_id).first()
     if not session:
@@ -1142,7 +2026,7 @@ def complete_interview_session(
 @app.get("/api/interview-sessions", response_model=List[InterviewSessionResponse])
 def list_interview_sessions(
     job_id: Optional[int] = None, status: Optional[str] = None,
-    db: Session = Depends(get_db), _user: User = Depends(get_current_user),
+    db: Session = Depends(get_db), _user: User = Depends(require_recruiter),
 ):
     """Powers the ATS-style pipeline view with batched candidate/job lookups."""
     query = db.query(InterviewSession)
@@ -1179,15 +2063,15 @@ def list_interview_sessions(
             "interview_type": getattr(s, "interview_type", "mixed") or "mixed",
             "difficulty": getattr(s, "difficulty", "Medium") or "Medium",
             "scheduled_at": s.scheduled_at.isoformat() if s.scheduled_at else None,
-            "created_at": s.created_at.isoformat(),
-            "updated_at": s.updated_at.isoformat(),
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+            "updated_at": s.updated_at.isoformat() if s.updated_at else None,
         })
     return results
 
 
 @app.get("/api/interview-sessions/{session_id}", response_model=InterviewSessionResponse)
 def get_interview_session(
-    session_id: int, db: Session = Depends(get_db), _user: User = Depends(get_current_user),
+    session_id: int, db: Session = Depends(get_db), _user: User = Depends(require_recruiter),
 ):
     session = db.query(InterviewSession).filter(InterviewSession.session_id == session_id).first()
     if not session:
@@ -1254,9 +2138,18 @@ def _candidate_to_profile_response(cand: Optional[Candidate], user: User) -> dic
     }
 
 
+@app.get("/api/candidate/jobs", response_model=List[JobResponse])
+def get_candidate_jobs(
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_candidate),
+):
+    jobs = db.query(Job).filter(Job.status == "open").order_by(Job.created_at.desc()).all()
+    return [JobResponse.from_orm_model(j) for j in jobs]
+
+
 @app.get("/api/candidate/profile", response_model=CandidateProfileResponse)
 def get_candidate_profile(
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
     cand = db.query(Candidate).filter(Candidate.user_id == user.user_id).first()
@@ -1266,7 +2159,7 @@ def get_candidate_profile(
 @app.put("/api/candidate/profile", response_model=CandidateProfileResponse)
 def update_candidate_profile(
     payload: CandidateProfileUpdate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
     cand = _get_or_create_candidate_for_user(user, db)
@@ -1295,10 +2188,15 @@ def update_candidate_profile(
 @app.post("/api/candidate/resume/upload", response_model=CandidateProfileResponse)
 async def upload_candidate_resume(
     file: UploadFile = File(...),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
-    filename = file.filename or "resume.pdf"
+    if settings_store.get_setting(db, "feature_resume_ai") == "false":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The AI Resume Intelligence feature is currently disabled by an administrator.",
+        )
+    filename = os.path.basename(file.filename or "resume.pdf")
     ext = os.path.splitext(filename)[1].lower()
     if ext not in [".pdf", ".docx", ".txt"]:
         raise HTTPException(
@@ -1307,7 +2205,8 @@ async def upload_candidate_resume(
         )
 
     os.makedirs("uploads", exist_ok=True)
-    file_path = os.path.join("uploads", f"user_{user.user_id}_{filename}")
+    saved_filename = f"user_{user.user_id}_{filename}"
+    file_path = os.path.join("uploads", saved_filename)
     content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
@@ -1336,7 +2235,7 @@ async def upload_candidate_resume(
         cand.certifications = json.dumps(extracted["certifications"])
     if extracted.get("projects"):
         cand.projects = json.dumps(extracted["projects"])
-    cand.resume_path = filename
+    cand.resume_path = saved_filename
 
     db.commit()
     db.refresh(cand)
@@ -1346,9 +2245,14 @@ async def upload_candidate_resume(
 @app.post("/api/candidate/resume/analyze", response_model=ResumeAnalysisResponse)
 def analyze_candidate_resume(
     payload: Optional[ResumeAnalysisRequest] = None,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
+    if settings_store.get_setting(db, "feature_resume_ai") == "false":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The AI Resume Intelligence feature is currently disabled by an administrator.",
+        )
     cand = _get_or_create_candidate_for_user(user, db)
     c_dict = _candidate_to_dict(cand)
 
@@ -1362,14 +2266,18 @@ def analyze_candidate_resume(
             target_job_dict = _job_to_dict(job)
             target_job_title = job.title
 
-    analysis = candidate_service.generate_resume_analysis(c_dict, target_job_dict)
+    try:
+        analysis = candidate_service.generate_resume_analysis(c_dict, target_job_dict)
+    except Exception as e:
+        logger.warning("Resume analysis failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"AI service failure during resume analysis: {e}")
 
     record = ResumeAnalysis(
         user_id=user.user_id,
         candidate_id=cand.candidate_id,
         target_job_id=target_job_id,
         analysis_data=json.dumps(analysis),
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(record)
     db.commit()
@@ -1382,14 +2290,14 @@ def analyze_candidate_resume(
         "target_job_id": record.target_job_id,
         "target_job_title": target_job_title,
         "analysis": analysis,
-        "created_at": record.created_at.isoformat(),
+        "created_at": record.created_at.isoformat() if record.created_at else None,
     }
 
 
 @app.get("/api/candidate/resume/analysis", response_model=ResumeAnalysisResponse)
 def get_candidate_resume_analysis(
     target_job_id: Optional[int] = None,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
     query = db.query(ResumeAnalysis).filter(ResumeAnalysis.user_id == user.user_id)
@@ -1414,7 +2322,7 @@ def get_candidate_resume_analysis(
         "target_job_id": record.target_job_id,
         "target_job_title": job_title,
         "analysis": json.loads(record.analysis_data),
-        "created_at": record.created_at.isoformat(),
+        "created_at": record.created_at.isoformat() if record.created_at else None,
     }
 
 
@@ -1425,9 +2333,14 @@ def get_candidate_practice_questions(
     difficulty: Literal["Easy", "Medium", "Hard"] = "Medium",
     question_format: Literal["Open-ended", "Multiple Choice"] = "Open-ended",
     count: int = Query(3, ge=1, le=10),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
+    if settings_store.get_setting(db, "feature_practice") == "false":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The Practice Assessment feature is currently disabled by an administrator.",
+        )
     if job_id:
         job = db.query(Job).filter(Job.job_id == job_id).first()
         if not job:
@@ -1457,9 +2370,14 @@ def get_candidate_practice_questions(
 @app.post("/api/candidate/practice-answers", response_model=PracticeAnswerResponse)
 def submit_candidate_practice_answer(
     payload: PracticeAnswerSubmit,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
+    if settings_store.get_setting(db, "feature_practice") == "false":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The Practice Assessment feature is currently disabled by an administrator.",
+        )
     cand = _get_or_create_candidate_for_user(user, db)
     job_title = "Software Engineer"
     if payload.job_id:
@@ -1467,13 +2385,17 @@ def submit_candidate_practice_answer(
         if job:
             job_title = job.title
 
-    feedback = candidate_service.evaluate_practice_answer(
-        question_text=payload.question_text,
-        candidate_answer=payload.candidate_answer,
-        question_type=payload.question_type or "Technical",
-        difficulty=payload.difficulty or "Medium",
-        job_title=job_title,
-    )
+    try:
+        feedback = candidate_service.evaluate_practice_answer(
+            question_text=payload.question_text,
+            candidate_answer=payload.candidate_answer,
+            question_type=payload.question_type or "Technical",
+            difficulty=payload.difficulty or "Medium",
+            job_title=job_title,
+        )
+    except Exception as e:
+        logger.warning("Practice answer evaluation failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"AI service failure during practice evaluation: {e}")
 
     record = PracticeAnswer(
         user_id=user.user_id,
@@ -1484,7 +2406,7 @@ def submit_candidate_practice_answer(
         difficulty=payload.difficulty or "Medium",
         candidate_answer=payload.candidate_answer,
         feedback=json.dumps(feedback),
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(record)
     db.commit()
@@ -1501,14 +2423,14 @@ def submit_candidate_practice_answer(
         "difficulty": record.difficulty,
         "candidate_answer": record.candidate_answer,
         "feedback": feedback,
-        "created_at": record.created_at.isoformat(),
+        "created_at": record.created_at.isoformat() if record.created_at else None,
     }
 
 
 @app.get("/api/candidate/practice-history", response_model=List[PracticeAnswerResponse])
 def get_candidate_practice_history(
     job_id: Optional[int] = None,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
     query = db.query(PracticeAnswer).filter(PracticeAnswer.user_id == user.user_id)
@@ -1536,7 +2458,7 @@ def get_candidate_practice_history(
             "difficulty": r.difficulty,
             "candidate_answer": r.candidate_answer,
             "feedback": fb,
-            "created_at": r.created_at.isoformat(),
+            "created_at": r.created_at.isoformat() if r.created_at else None,
         })
     return results
 
@@ -1544,9 +2466,14 @@ def get_candidate_practice_history(
 @app.post("/api/candidate/mock-interview/start", response_model=InterviewSessionResponse)
 def start_candidate_mock_interview(
     payload: CandidateMockInterviewStart,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
+    if settings_store.get_setting(db, "feature_mock_interview") == "false":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The AI Mock Interview feature is currently disabled by an administrator.",
+        )
     job = db.query(Job).filter(Job.job_id == payload.job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1561,7 +2488,7 @@ def start_candidate_mock_interview(
         interview_type=payload.interview_type or "mixed",
         difficulty=payload.difficulty or "Medium",
         created_by=user.user_id,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(session)
     db.commit()
@@ -1586,9 +2513,14 @@ def start_candidate_mock_interview(
 def respond_candidate_mock_interview(
     session_id: int,
     payload: InterviewCandidateMessage,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
+    if settings_store.get_setting(db, "feature_mock_interview") == "false":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The AI Mock Interview feature is currently disabled by an administrator.",
+        )
     session = db.query(InterviewSession).filter(InterviewSession.session_id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Interview session not found")
@@ -1625,7 +2557,7 @@ def respond_candidate_mock_interview(
 @app.post("/api/candidate/mock-interview/{session_id}/complete", response_model=InterviewSessionResponse)
 def complete_candidate_mock_interview(
     session_id: int,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
     session = db.query(InterviewSession).filter(InterviewSession.session_id == session_id).first()
@@ -1643,7 +2575,11 @@ def complete_candidate_mock_interview(
     job_dict = _job_to_dict(job)
     c_dict = _candidate_to_dict(candidate)
 
-    evaluation = candidate_service.evaluate_mock_interview(job_dict, c_dict, transcript)
+    try:
+        evaluation = candidate_service.evaluate_mock_interview(job_dict, c_dict, transcript)
+    except Exception as e:
+        logger.warning("Mock interview evaluation failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"AI service failure during mock interview evaluation: {e}")
 
     session.status = "completed"
     session.feedback = json.dumps(evaluation)
@@ -1654,7 +2590,7 @@ def complete_candidate_mock_interview(
 
 @app.get("/api/candidate/mock-interviews", response_model=List[InterviewSessionResponse])
 def list_candidate_mock_interviews(
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
     cand = db.query(Candidate).filter(Candidate.user_id == user.user_id).first()
@@ -1672,7 +2608,7 @@ def list_candidate_mock_interviews(
 @app.get("/api/candidate/mock-interviews/{session_id}", response_model=InterviewSessionResponse)
 def get_candidate_mock_interview(
     session_id: int,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_candidate),
     db: Session = Depends(get_db),
 ):
     session = db.query(InterviewSession).filter(InterviewSession.session_id == session_id).first()

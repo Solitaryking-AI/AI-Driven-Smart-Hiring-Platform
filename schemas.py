@@ -1,7 +1,7 @@
 import json
 import re
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
@@ -32,6 +32,7 @@ class CandidateResponse(BaseModel):
     certifications: Optional[List[Any]] = None
     projects: Optional[List[Any]] = None
     resume_path: Optional[str] = None
+    stage: Optional[str] = "new"
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -57,6 +58,7 @@ class CandidateResponse(BaseModel):
             certifications=parse_json(db_obj.certifications),
             projects=parse_json(db_obj.projects),
             resume_path=db_obj.resume_path,
+            stage=(getattr(db_obj, "stage", None) or "new").lower(),
             created_at=db_obj.created_at
         )
 
@@ -120,6 +122,7 @@ class HiringScoreBreakdown(BaseModel):
     experience_stability_score: float = 0.0
     education_level_score: float = 0.0
     certification_score: float = 0.0
+    component_scores: Optional[Dict[str, float]] = None
     source_file: Optional[str] = None
     blended_score: Optional[float] = None
 
@@ -357,7 +360,7 @@ class JobResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_ALLOWED_ROLES = {"Recruiter", "HR Manager", "Admin", "Candidate"}
+_ALLOWED_ROLES = {"Candidate", "Recruiter", "Admin"}
 
 
 class UserCreate(BaseModel):
@@ -367,7 +370,7 @@ class UserCreate(BaseModel):
     password: str
     confirm_password: str
     company_name: Optional[str] = None
-    job_title: str          # "Recruiter" | "HR Manager" | "Admin" | "Candidate"
+    job_title: str          # "Candidate" | "Recruiter" | "Admin"
     phone_number: Optional[str] = None
 
     @field_validator("email")
@@ -381,6 +384,8 @@ class UserCreate(BaseModel):
     @field_validator("password")
     @classmethod
     def password_strength(cls, v: str) -> str:
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("Password must not exceed 72 bytes.")
         if len(v) < 8:
             raise ValueError("Password must be at least 8 characters long.")
         if not any(c.isdigit() for c in v):
@@ -434,6 +439,7 @@ class UserResponse(BaseModel):
     phone_number: Optional[str] = None
     is_active: bool
     created_at: datetime
+    last_login_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -448,6 +454,7 @@ class UserResponse(BaseModel):
             phone_number=db_obj.phone_number,
             is_active=db_obj.is_active,
             created_at=db_obj.created_at,
+            last_login_at=getattr(db_obj, "last_login_at", None),
         )
 
 
@@ -499,7 +506,7 @@ class ResumeAnalysisResponse(BaseModel):
     target_job_id: Optional[int] = None
     target_job_title: Optional[str] = None
     analysis: dict
-    created_at: str
+    created_at: Optional[str] = None
 
 
 class PracticeAnswerSubmit(BaseModel):
@@ -521,10 +528,311 @@ class PracticeAnswerResponse(BaseModel):
     difficulty: Optional[str] = None
     candidate_answer: str
     feedback: dict
-    created_at: str
+    created_at: Optional[str] = None
 
 
 class CandidateMockInterviewStart(BaseModel):
     job_id: int
     interview_type: Optional[str] = "mixed"  # "Technical" | "Behavioral" | "mixed"
     difficulty: Optional[str] = "Medium"
+
+
+# ---------------------------------------------------------------------------
+# Recruitment Pipeline Schemas
+# ---------------------------------------------------------------------------
+
+VALID_PIPELINE_STAGES = ["new", "shortlisted", "interview", "offered", "hired", "rejected"]
+
+
+class ApplicationStageUpdate(BaseModel):
+    stage: str
+    notes: Optional[str] = None
+
+    @field_validator("stage")
+    @classmethod
+    def validate_stage(cls, v: str) -> str:
+        stage_norm = v.strip().lower()
+        if stage_norm not in VALID_PIPELINE_STAGES:
+            raise ValueError(f"Invalid hiring stage '{v}'. Must be one of: {', '.join(VALID_PIPELINE_STAGES)}")
+        return stage_norm
+
+
+class ApplicationNotesUpdate(BaseModel):
+    notes: Optional[str] = None
+
+
+class ApplicationCreate(BaseModel):
+    candidate_id: int
+    job_id: Optional[int] = None
+    stage: Optional[str] = "new"
+    notes: Optional[str] = None
+
+    @field_validator("stage")
+    @classmethod
+    def validate_stage(cls, v: Optional[str]) -> str:
+        if not v:
+            return "new"
+        stage_norm = v.strip().lower()
+        if stage_norm not in VALID_PIPELINE_STAGES:
+            raise ValueError(f"Invalid hiring stage '{v}'. Must be one of: {', '.join(VALID_PIPELINE_STAGES)}")
+        return stage_norm
+
+
+class CandidateAddPipeline(BaseModel):
+    name: str
+    email: str
+    phone: Optional[str] = None
+    job_id: Optional[int] = None
+    stage: Optional[str] = "new"
+    notes: Optional[str] = None
+    skills: Optional[Union[List[str], str]] = None
+    education: Optional[Union[List[Any], str]] = None
+    experience: Optional[Union[List[Any], str]] = None
+
+    @field_validator("stage")
+    @classmethod
+    def validate_stage(cls, v: Optional[str]) -> str:
+        if not v:
+            return "new"
+        stage_norm = v.strip().lower()
+        if stage_norm not in VALID_PIPELINE_STAGES:
+            raise ValueError(f"Invalid hiring stage '{v}'. Must be one of: {', '.join(VALID_PIPELINE_STAGES)}")
+        return stage_norm
+
+
+class ApplicationCardResponse(BaseModel):
+    application_id: int
+    candidate_id: int
+    candidate_name: str
+    candidate_email: Optional[str] = None
+    candidate_phone: Optional[str] = None
+    candidate_initials: str
+    job_id: Optional[int] = None
+    job_title: Optional[str] = None
+    skills: List[str] = []
+    stage: str
+    match_score: Optional[float] = None
+    notes: Optional[str] = None
+    resume_path: Optional[str] = None
+    stage_history: List[dict] = []
+    created_at: str
+    updated_at: str
+
+
+class PipelineBoardResponse(BaseModel):
+    stages: dict  # {"new": [cards], "shortlisted": [cards], ...}
+    counts: dict  # {"new": int, "shortlisted": int, ..., "total": int}
+    filtered_counts: dict
+    total_applications: int
+
+
+class CandidatePipelineDetailResponse(BaseModel):
+    application_id: int
+    candidate_id: int
+    name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    skills: List[str] = []
+    education: List[Any] = []
+    experience: List[Any] = []
+    certifications: List[Any] = []
+    projects: List[Any] = []
+    resume_path: Optional[str] = None
+    job_id: Optional[int] = None
+    job_title: Optional[str] = None
+    job_department: Optional[str] = None
+    job_required_skills: List[str] = []
+    stage: str
+    match_score: Optional[float] = None
+    match_breakdown: Optional[dict] = None
+    notes: Optional[str] = None
+    stage_history: List[dict] = []
+    interviews: List[dict] = []
+    created_at: str
+    updated_at: str
+
+
+# ---------------------------------------------------------------------------
+# Admin Dashboard Schemas (Phase 2)
+# ---------------------------------------------------------------------------
+
+class DailySignup(BaseModel):
+    date: str
+    count: int
+
+
+class AdminOverviewResponse(BaseModel):
+    user_counts_by_role: Dict[str, int]
+    active_users_7d: int
+    active_users_30d: int
+    signups_per_day_30d: List[DailySignup]
+    jobs_open: int
+    jobs_closed: int
+    candidate_count: int
+    interviews_by_status: Dict[str, int]
+    resume_analyses_count: int
+    ai_calls_7d: int
+    ai_error_rate_7d: float
+    db_file_size_bytes: int
+    uploads_folder_size_bytes: int
+
+
+class AdminUserUpdate(BaseModel):
+    job_title: Optional[str] = None
+    is_active: Optional[bool] = None
+    reason: str
+
+
+class AdminUserCreate(BaseModel):
+    full_name: str
+    email: str
+    company_name: Optional[str] = "SmartHire"
+    job_title: str
+    phone_number: Optional[str] = None
+
+    @field_validator("email")
+    @classmethod
+    def email_valid(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not _EMAIL_RE.match(v):
+            raise ValueError("Invalid email address format.")
+        return v
+
+    @field_validator("job_title")
+    @classmethod
+    def role_valid(cls, v: str) -> str:
+        if v not in _ALLOWED_ROLES:
+            raise ValueError(f"job_title must be one of: {', '.join(sorted(_ALLOWED_ROLES))}")
+        return v
+
+    @field_validator("full_name")
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("This field cannot be empty.")
+        return v.strip()
+
+
+class AdminUserCreateResponse(BaseModel):
+    user: UserResponse
+    temp_password: str
+
+
+class AdminPasswordResetResponse(BaseModel):
+    user_id: int
+    email: str
+    temp_password: str
+    message: str = "Password reset successfully. Please share the temporary password securely."
+
+
+class AuditLogResponse(BaseModel):
+    audit_id: int
+    actor_id: Optional[int] = None
+    actor_email: Optional[str] = None
+    action: str
+    target_type: Optional[str] = None
+    target_id: Optional[str] = None
+    details: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DuplicateEmailGroup(BaseModel):
+    email: str
+    count: int
+    candidate_ids: List[int]
+
+
+class CandidateHealthBrief(BaseModel):
+    candidate_id: int
+    name: Optional[str] = None
+    email: Optional[str] = None
+
+
+class MissingResumeRecord(BaseModel):
+    candidate_id: int
+    name: Optional[str] = None
+    resume_path: str
+
+
+class DataHealthResponse(BaseModel):
+    duplicate_candidates: List[DuplicateEmailGroup]
+    empty_skills_candidates: List[CandidateHealthBrief]
+    unreferenced_upload_files: List[str]
+    missing_resume_files: List[MissingResumeRecord]
+
+
+class CandidatePurgeRequest(BaseModel):
+    older_than_days: Optional[int] = None
+    stage: Optional[str] = None
+    confirm_text: Optional[str] = None
+
+
+class CandidatePurgeResponse(BaseModel):
+    purged_count: int
+    message: str
+
+
+class AdminJobResponse(BaseModel):
+    job_id: int
+    title: str
+    department: Optional[str] = None
+    location: Optional[str] = None
+    status: str
+    created_by: Optional[int] = None
+    owner_name: Optional[str] = None
+    owner_email: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AdminJobUpdate(BaseModel):
+    created_by: Optional[int] = None
+    status: Optional[str] = None
+
+
+class RecruiterActivityResponse(BaseModel):
+    user_id: int
+    full_name: str
+    email: str
+    last_login_at: Optional[datetime] = None
+    jobs_created: int
+    interviews_created: int
+    candidates_uploaded: int
+
+
+class DailyAiUsage(BaseModel):
+    date: str
+    calls: int
+    errors: int
+    avg_latency_ms: float
+
+
+class TopAiUser(BaseModel):
+    user_id: Optional[int] = None
+    email: Optional[str] = None
+    calls: int
+
+
+class AiUsageResponse(BaseModel):
+    days: int
+    total_calls: int
+    calls_per_feature: Dict[str, int]
+    p50_latency_ms: float
+    p95_latency_ms: float
+    error_rate: float
+    top_10_users: List[TopAiUser]
+    daily_series: List[DailyAiUsage]
+
+
+class PlatformSettingsResponse(BaseModel):
+    settings: Dict[str, str]
+
+
+class PlatformSettingsUpdate(BaseModel):
+    settings: Dict[str, Any]
+
+

@@ -185,7 +185,7 @@ def test_candidate_resume_upload():
     res = client.post("/api/candidate/resume/upload", files=files, headers=headers)
     assert res.status_code == 200
     profile = res.json()
-    assert profile["resume_path"] == "test_resume.txt"
+    assert profile["resume_path"].endswith("test_resume.txt")
     assert "Python" in profile["skills"]
 
 
