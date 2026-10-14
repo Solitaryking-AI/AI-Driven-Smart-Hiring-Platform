@@ -190,15 +190,28 @@ def calculate_seniority_fit(
 
 
 def score_candidate(
-    candidate_skills: Optional[List[str]],
-    candidate_experience: Optional[List[Dict[str, Any]]],
-    job: Dict[str, Any],
+    candidate_skills: Any,
+    candidate_experience: Any = None,
+    job: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate candidate qualifications against a job specification.
-    Returns structured scoring breakdown with sub-scores and final_score.
+    Supports both:
+      - 3 arguments: score_candidate(candidate_skills, candidate_experience, job)
+      - 2 arguments: score_candidate(candidate_dict, job_dict)
+    Returns structured scoring breakdown with sub-scores, final_score, and overall_score.
     """
-    raw_candidate_skills = candidate_skills or []
+    if isinstance(candidate_skills, dict) and job is None:
+        cand_dict = candidate_skills
+        job_dict = candidate_experience or {}
+        raw_candidate_skills = cand_dict.get("skills") or []
+        candidate_experience = cand_dict.get("experience") or []
+        job = job_dict
+    else:
+        raw_candidate_skills = candidate_skills or []
+        candidate_experience = candidate_experience or []
+        job = job or {}
+
     cand_norm_set = normalize_skill_list(raw_candidate_skills)
 
     # 1. Required skills evaluation
@@ -254,6 +267,7 @@ def score_candidate(
 
     return {
         "final_score": round(max(0.0, min(100.0, final_score)), 2),
+        "overall_score": round(max(0.0, min(100.0, final_score)), 2),
         "skills_score": round(skills_score, 2),
         "nice_to_have_score": round(nice_score, 2),
         "experience_fit_score": round(exp_fit_score, 2),

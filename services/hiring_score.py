@@ -237,6 +237,13 @@ def calculate_hiring_score(candidate: Dict[str, Any]) -> Dict[str, float]:
         "experience_stability_score": stability,
         "education_level_score": education,
         "certification_score": certs,
+        "component_scores": {
+            "resume_completeness": completeness,
+            "skill_breadth": breadth,
+            "experience_stability": stability,
+            "education_level": education,
+            "certifications": certs,
+        },
     }
 
 

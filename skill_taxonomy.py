@@ -132,3 +132,63 @@ def normalize_skill(skill: Optional[str]) -> str:
         return SKILL_SYNONYMS[compact]
 
     return cleaned
+
+
+SKILL_DISPLAY_MAP: Dict[str, str] = {
+    "aws": "AWS",
+    "gcp": "GCP",
+    "sql": "SQL",
+    "nosql": "NoSQL",
+    "nlp": "NLP",
+    "ml": "ML",
+    "ai": "AI",
+    "ci/cd": "CI/CD",
+    "ui/ux": "UI/UX",
+    "api": "API",
+    "apis": "APIs",
+    "rest api": "REST API",
+    "graphql": "GraphQL",
+    "html": "HTML",
+    "css": "CSS",
+    "php": "PHP",
+    "etl": "ETL",
+    "llm": "LLM",
+    "llms": "LLMs",
+    "rdbms": "RDBMS",
+    "javascript": "JavaScript",
+    "typescript": "TypeScript",
+    "postgresql": "PostgreSQL",
+    "mysql": "MySQL",
+    "mongodb": "MongoDB",
+    "node.js": "Node.js",
+    "next.js": "Next.js",
+    "vue.js": "Vue.js",
+    "react.js": "React.js",
+    "express.js": "Express.js",
+    "power bi": "Power BI",
+    "c++": "C++",
+    "c#": "C#",
+    "scikit-learn": "Scikit-Learn",
+    "tensorflow": "TensorFlow",
+    "pytorch": "PyTorch",
+    "kubernetes": "Kubernetes",
+    "docker": "Docker",
+}
+
+
+def format_skill_display(skill: Optional[str]) -> str:
+    """Format normalized canonical skill into proper brand/acronym casing."""
+    if not skill or not isinstance(skill, str):
+        return ""
+    norm = skill.strip().lower()
+    if norm in SKILL_DISPLAY_MAP:
+        return SKILL_DISPLAY_MAP[norm]
+    words = norm.split(" ")
+    formatted_words = []
+    for w in words:
+        if w in SKILL_DISPLAY_MAP:
+            formatted_words.append(SKILL_DISPLAY_MAP[w])
+        else:
+            formatted_words.append(w.title())
+    return " ".join(formatted_words)
+
