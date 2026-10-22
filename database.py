@@ -76,13 +76,13 @@ def init_db():
                     c.candidate_id,
                     CASE
                         WHEN LOWER(TRIM(COALESCE(c.stage, 'new'))) IN ('new', 'shortlisted', 'interview', 'offered', 'hired', 'rejected')
-                        THEN LOWER(TRIM(c.stage))
+                        THEN LOWER(TRIM(COALESCE(c.stage, 'new')))
                         ELSE 'new'
                     END,
                     '[{"from_stage": null, "to_stage": "' ||
                     CASE
                         WHEN LOWER(TRIM(COALESCE(c.stage, 'new'))) IN ('new', 'shortlisted', 'interview', 'offered', 'hired', 'rejected')
-                        THEN LOWER(TRIM(c.stage))
+                        THEN LOWER(TRIM(COALESCE(c.stage, 'new')))
                         ELSE 'new'
                     END || '", "timestamp": "' || COALESCE(c.created_at, '2026-01-01 00:00:00') || '", "updated_by": "system", "notes": "Initial pipeline record"}]',
                     COALESCE(c.created_at, CURRENT_TIMESTAMP),
